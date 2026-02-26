@@ -3,11 +3,12 @@ import streamlit.components.v1 as components
 import requests
 import json
 
-st.set_page_config(page_title="Matomas Site Intelligence v0.39", layout="wide")
+st.set_page_config(page_title="Matomas Site Intelligence v0.40", layout="wide")
 
 # --- 1. STAŽENÍ HLAVNÍ PARCELY (S-JTSK) ---
 def stahni_parcelu_cuzk_sjtsk(ku_kod, kmen, pod):
-    url = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/5/query"
+    # Opravená doména gov.cz
+    url = "https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/5/query"
     where_clause = f"katastralniuzemi={ku_kod} AND kmenovecislo={kmen}"
     if pod and pod.strip() != "": where_clause += f" AND poddelenicisla={pod}"
     else: where_clause += " AND poddelenicisla IS NULL"
@@ -26,7 +27,8 @@ def stahni_parcelu_cuzk_sjtsk(ku_kod, kmen, pod):
 def stahni_okoli_sjtsk(cx_orig, cy_orig, layer_id, out_fields="objectid"):
     xmin, xmax = cx_orig - 50, cx_orig + 50
     ymin, ymax = cy_orig - 50, cy_orig + 50
-    url = f"https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/{layer_id}/query"
+    # Opravená doména gov.cz
+    url = f"https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/{layer_id}/query"
     params = {"geometry": f"{xmin},{ymin},{xmax},{ymax}", "geometryType": "esriGeometryEnvelope", "inSR": "5514", "spatialRel": "esriSpatialRelIntersects", "outFields": out_fields, "returnGeometry": "true", "outSR": "5514", "f": "json"}
     try:
         res = requests.get(url, params=params, timeout=15)
@@ -36,12 +38,13 @@ def stahni_okoli_sjtsk(cx_orig, cy_orig, layer_id, out_fields="objectid"):
 
 # --- 3. STAŽENÍ VÝŠKOPISU DMR 5G ---
 def stahni_dmr5g(pts_sjtsk):
-    # Volání služby DMR 5G přes ArcGIS REST API
-    url = "https://ags.cuzk.cz/arcgis/rest/services/3D/dmr5g/ImageServer/getSamples"
+    # Opravená doména gov.cz, aby nedocházelo ke ztrátě POST dat při přesměrování
+    url = "https://ags.cuzk.gov.cz/arcgis/rest/services/3D/dmr5g/ImageServer/getSamples"
     geom = {"points": pts_sjtsk, "spatialReference": {"wkid": 5514}}
     data = {"geometry": json.dumps(geom), "geometryType": "esriGeometryMultipoint", "returnFirstValueOnly": "true", "f": "json"}
     try:
         res = requests.post(url, data=data, timeout=15)
+        st.session_state['terrain_debug'] = res.text # Uložíme odpověď pro diagnostiku
         if res.status_code == 200:
             rj = res.json()
             if "samples" in rj:
@@ -53,7 +56,8 @@ def stahni_dmr5g(pts_sjtsk):
                         except: vals.append(None)
                     else: vals.append(None)
                 return vals
-    except: pass
+    except Exception as e:
+        st.session_state['terrain_debug'] = str(e)
     return None
 
 # --- 4. NORMALIZACE S-JTSK ---
@@ -130,6 +134,7 @@ with st.sidebar:
                         ly = ymax_t - j * (H_terrain / (grid_size - 1))
                         for i in range(grid_size):
                             lx = xmin_t + i * (W_terrain / (grid_size - 1))
+                            # Převod zpět do absolutních S-JTSK
                             raw_sjtsk_points.append([-(lx + cx), -(ly + cy)])
                             
                     heights = stahni_dmr5g(raw_sjtsk_points)
@@ -158,11 +163,16 @@ with st.sidebar:
     pos_z = st.slider("Posun domu Z", -30.0, 30.0, 0.0)
     rotace = st.slider("Natočení domu (°)", 0, 360, 0)
     
+    # Diagnostika terénu
     if st.session_state.get('terrain'):
-        st.info(f"Kóta 0.000 (střed parcely) = **{st.session_state['terrain']['z_nula']:.2f} m n.m. (Bpv)**")
+        st.success(f"Kóta 0.000 (střed parcely) = **{st.session_state['terrain']['z_nula']:.2f} m n.m. (Bpv)**")
+    elif nacteni_teren:
+        st.warning("Terén se nepodařilo stáhnout.")
+        with st.expander("Výpis chyby API ČÚZK"):
+            st.code(st.session_state.get('terrain_debug', 'Žádná data z API'), language='json')
 
 # --- 3D ENGINE ---
-st.title("🏡 Architektonická situace (v0.39)")
+st.title("🏡 Architektonická situace (v0.40)")
 
 main_pts = st.session_state.get('main_pts', [])
 neighbors = st.session_state.get('neighbors', [])
@@ -172,6 +182,9 @@ terrain_data = st.session_state.get('terrain', None)
 if not main_pts:
     st.info("Zadej parcelu a klikni na 'Stáhnout a Analyzovat'.")
 else:
+    # Matematická oprava záporného Z pro bezpečný JS
+    safe_z = -1 * pos_z
+    
     three_js_code = f"""
     <div id="container" style="width: 100%; height: 750px; background: #ffffff; border: 1px solid #ddd; border-radius: 8px;"></div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -190,7 +203,6 @@ else:
         const bldgs = {json.dumps(budovy)};
         const tData = {json.dumps(terrain_data)};
 
-        // Bisektor algoritmus
         function getOffsetPoints(points, distance) {{
             const result = [];
             const len = points.length;
@@ -235,7 +247,7 @@ else:
                 tVerts[i * 3 + 2] = tData.heights[i];
             }}
             tGeom.computeVertexNormals();
-            const tMat = new THREE.MeshPhongMaterial({{ color: 0x4caf50, wireframe: true, transparent: true, opacity: 0.3 }});
+            const tMat = new THREE.MeshPhongMaterial({{ color: 0x4caf50, wireframe: true, transparent: true, opacity: 0.4 }});
             const terrain = new THREE.Mesh(tGeom, tMat);
             terrain.rotation.x = -Math.PI / 2;
             terrain.position.set(0, 0, 0);
@@ -302,12 +314,11 @@ else:
             scene.add(off7Line);
         }});
 
-        // 5. TVŮJ DŮM S VÝŠKOVÝM OSAZENÍM
+        // 5. TVŮJ DŮM S BEZPEČNÝM VÝŠKOVÝM OSAZENÍM
         const houseGeom = new THREE.BoxGeometry(6.25, 4.0, 12.5);
         const houseMat = new THREE.MeshPhongMaterial({{ color: 0x1976d2, transparent: true, opacity: 0.9 }});
         const house = new THREE.Mesh(houseGeom, houseMat);
-        // Osazení je ošetřeno proti chybě se záporným Z
-        house.position.set({pos_x}, {vyska + 2.0}, {-pos_z});
+        house.position.set({pos_x}, {vyska + 2.0}, {safe_z});
         house.rotation.y = ({rotace} * Math.PI) / 180;
         house.castShadow = true;
         scene.add(house);
