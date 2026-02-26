@@ -1,31 +1,23 @@
 import streamlit as st
 import streamlit.components.v1 as components
-import numpy as np # Teď už ho budeme potřebovat pro práci s maticí výšek
 
-st.set_page_config(page_title="Matomas Terrain Pro", layout="wide")
-
-# SIMULACE IMPORTU Z ČÚZK (DMR 5G)
-# V reálu tohle pole naplníme daty z API volání
-def generate_real_terrain(size):
-    # Simulujeme reálný kopec s proláklinou
-    x = np.linspace(0, 5, size)
-    y = np.linspace(0, 5, size)
-    X, Y = np.meshgrid(x, y)
-    Z = np.sin(X) * np.cos(Y) * 3  # Tady budou reálná data z výškopisu
-    return Z.flatten().tolist()
+st.set_page_config(page_title="Matomas Site Projection", layout="wide")
 
 with st.sidebar:
-    st.title("🏗️ Technická morfologie")
-    st.write("Data z digitálního modelu reliéfu (DMR)")
-    sklon = st.slider("Celkový sklon svahu (%)", 0, 30, 10)
-    vyska_osazeni = st.slider("Osazení 1.NP (m.n.m.)", 350.0, 450.0, 410.0)
-
-# Příprava dat pro JS
-size = 21 # mřížka 21x21 bodů
-terrain_data = generate_real_terrain(size)
+    st.title("🏗️ Projekt na terénu")
+    st.subheader("1. Tvar parcely")
+    coords_raw = st.text_area("Body pozemku [x,y]", value="[[0,0], [30,5], [25,40], [-10,35]]")
+    
+    st.subheader("2. Výškový profil")
+    sklon = st.slider("Intenzita svahu", 0.0, 5.0, 1.5)
+    
+    st.subheader("3. Osazení domu")
+    vyska_nuly = st.slider("Výška 0.000 (m.n.m)", 405.0, 415.0, 410.0)
+    pos_x = st.slider("X", -15.0, 15.0, 5.0)
+    pos_z = st.slider("Z", -20.0, 20.0, 15.0)
 
 three_js_code = f"""
-<div id="container" style="width: 100%; height: 650px; background: #f0f2f6; border-radius: 15px;"></div>
+<div id="container" style="width: 100%; height: 650px; background: #000; border-radius: 15px;"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
@@ -33,40 +25,62 @@ three_js_code = f"""
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth / 650, 0.1, 1000);
     const renderer = new THREE.WebGLRenderer({{ antialias: true }});
     renderer.setSize(window.innerWidth, 650);
-    renderer.shadowMap.enabled = true;
     document.getElementById('container').appendChild(renderer.domElement);
 
-    // TERÉN Z MATICE (DMR simulace)
-    const geometry = new THREE.PlaneGeometry(40, 40, {size-1}, {size-1});
-    const vertices = geometry.attributes.position.array;
-    const heights = {terrain_data};
+    const pts = {coords_raw};
+    const segments = 25;
 
-    for (let i = 0; i < heights.length; i++) {{
-        // Každému bodu mřížky přiřadíme výšku z importu + sklon svahu
-        const slopeOffset = (i / {size}) * ({sklon} / 10);
-        vertices[i * 3 + 2] = heights[i] + slopeOffset;
+    // 1. GENERÁTOR TERÉNU VE TVARU POZEMKU (Shape + Extrude na Mesh)
+    const shape = new THREE.Shape();
+    shape.moveTo(pts[0][0], pts[0][1]);
+    pts.forEach(p => shape.lineTo(p[0], p[1]));
+    shape.closePath();
+
+    // Vytvoříme geometrii a ručně jí ohneme podle "DMR"
+    const terrainGeom = new THREE.ShapeBufferGeometry(shape, 20);
+    const posAttr = terrainGeom.attributes.position;
+    
+    for (let i = 0; i < posAttr.count; i++) {{
+        let x = posAttr.getX(i);
+        let y = posAttr.getY(i);
+        // MATEMATIKA SVAHU: Výška Z je určena pozicí na parcele
+        let z = (Math.sin(x*0.1) + (y*0.2)) * {sklon};
+        posAttr.setZ(i, z);
     }}
-    geometry.computeVertexNormals();
+    terrainGeom.computeVertexNormals();
 
-    const material = new THREE.MeshPhongMaterial({{ color: 0x91cf91, wireframe: true }});
-    const terrain = new THREE.Mesh(geometry, material);
+    const terrainMat = new THREE.MeshPhongMaterial({{ color: 0x228B22, wireframe: true, side: THREE.DoubleSide }});
+    const terrain = new THREE.Mesh(terrainGeom, terrainMat);
     terrain.rotation.x = -Math.PI / 2;
-    terrain.receiveShadow = true;
     scene.add(terrain);
 
-    // DŮM - 0.000 (Zlatý Standard)
+    // 2. PROPSÁNÍ HRANIC (Vektorová čára kopírující terén)
+    const borderPoints = [];
+    pts.forEach(p => {{
+        let x = p[0];
+        let y = p[1];
+        let z = (Math.sin(x*0.1) + (y*0.2)) * {sklon};
+        borderPoints.push(new THREE.Vector3(x, z + 0.1, -y));
+    }});
+    borderPoints.push(borderPoints[0]); // Uzavřít loop
+    
+    const borderGeom = new THREE.BufferGeometry().setFromPoints(borderPoints);
+    const borderLine = new THREE.Line(borderGeom, new THREE.LineBasicMaterial({{ color: 0xffffff, linewidth: 2 }}));
+    scene.add(borderLine);
+
+    // 3. DŮM (Zlatý Standard)
     const houseGeom = new THREE.BoxGeometry(6.25, 2.7, 12.5);
-    const houseMat = new THREE.MeshPhongMaterial({{ color: 0x3498db }});
+    const houseMat = new THREE.MeshPhongMaterial({{ color: 0x3498db, transparent: true, opacity: 0.8 }});
     const house = new THREE.Mesh(houseGeom, houseMat);
-    // Výškově dům sedí na uživatelské kótě (relativně k terénu)
-    house.position.set(0, 1.35 + ({vyska_osazeni} - 410), 0);
-    house.castShadow = true;
+    house.position.set({pos_x}, {vyska_nuly} - 410 + 1.35, -{pos_z});
     scene.add(house);
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    // Pomocná mřížka absolutní nuly
+    scene.add(new THREE.GridHelper(100, 20, 0x444444, 0x222222));
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
     const sun = new THREE.DirectionalLight(0xffffff, 0.8);
-    sun.position.set(20, 50, 20);
-    sun.castShadow = true;
+    sun.position.set(10, 50, 10);
     scene.add(sun);
 
     camera.position.set(40, 40, 40);
