@@ -1,5 +1,2 @@
 streamlit
-matplotlib
 ezdxf
-numpy
-shapely
