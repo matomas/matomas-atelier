@@ -3,57 +3,61 @@ import streamlit.components.v1 as components
 import requests
 import json
 
-st.set_page_config(page_title="Matomas Live API v0.28", layout="wide")
+st.set_page_config(page_title="Matomas Live API v0.29", layout="wide")
 
 # --- FUNKCE PRO STAŽENÍ DAT Z ČÚZK ---
 def stahni_parcelu_cuzk(ku_kod, kmen, pod):
-    # Endpoint pro vrstvu Parcely (číslo 17 v RÚIAN MapServeru)
-    url = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/17/query"
+    # RÚIAN Prohlížecí služba: Parcely jsou na vrstvě 5
+    url = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/5/query"
     
-    where_clause = f"KATUZE_KOD={ku_kod} AND KMENOVE_CISLO={kmen}"
-    if pod:
-        where_clause += f" AND PODODDELENI_CISLA={pod}"
+    # Přesné názvy sloupců v databázi RÚIAN
+    where_clause = f"katuze_kod={ku_kod} AND kmenovecislo={kmen}"
+    if pod and pod.strip() != "":
+        where_clause += f" AND poddelenicisla={pod}"
+    else:
+        where_clause += " AND poddelenicisla IS NULL" # Zásadní pro parcely bez lomítka
         
     params = {
         "where": where_clause,
-        "outFields": "OBJECTID,KATUZE_KOD,KMENOVE_CISLO",
+        "outFields": "*",
         "returnGeometry": "true",
         "f": "geojson"
     }
     
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(url, params=params, timeout=15)
         if response.status_code == 200:
             data = response.json()
+            
+            # Detekce vnitřních chyb SQL dotazu v ArcGIS
+            if "error" in data:
+                return f"ArcGIS Chyba: {data['error'].get('message', 'Neznámý problém')}"
+            
             if "features" in data and len(data["features"]) > 0:
-                # GeoJSON polygon je seznam ringů, bereme první (vnější hranici)
+                # GeoJSON polygon se skládá z "rings" - bereme ten první (vnější hranici)
                 coords = data["features"][0]["geometry"]["coordinates"][0]
                 return coords
             else:
-                return "Nenalezeno"
+                return "Nenalezeno - Parcela neexistuje, nebo jsi zadal špatné KÚ."
         else:
-            return f"Chyba serveru: {response.status_code}"
+            return f"Výpadek ČÚZK serveru: {response.status_code}"
     except Exception as e:
         return f"Chyba připojení: {e}"
 
-# --- FUNKCE PRO PŘEVOD S-JTSK DO 3D NULY ---
+# --- FUNKCE PRO PŘEVOD S-JTSK ---
 def normalizuj_sjtsk(raw_pts):
     if not raw_pts or not isinstance(raw_pts, list): return []
-    
-    # Najdeme těžiště (bounding box center)
+    # Vycentrujeme obrovská záporná čísla do [0,0] pro 3D scénu
     xs = [p[0] for p in raw_pts]
     ys = [p[1] for p in raw_pts]
     cx = min(xs) + (max(xs) - min(xs)) / 2
     cy = min(ys) + (max(ys) - min(ys)) / 2
     
-    # S-JTSK má specifickou orientaci os. Pro začátek to jen posuneme do [0,0].
-    # V Three.js pak použijeme X a -Y pro správné zobrazení na rovině Z.
     return [[round(p[0] - cx, 3), round(p[1] - cy, 3)] for p in raw_pts]
 
 # --- UI a SIDEBAR ---
 with st.sidebar:
     st.title("📡 Živé napojení ČÚZK")
-    st.info("Zadejte parametry podle RÚIAN")
     
     ku_kod = st.text_input("Kód KÚ (např. 707015 pro Nučničky)", value="707015")
     col1, col2 = st.columns(2)
@@ -62,8 +66,8 @@ with st.sidebar:
     with col2:
         pod = st.text_input("Pododdělení", value="104")
         
-    if st.button("Stáhnout z katastru", type="primary"):
-        with st.spinner("Stahuji data z ČÚZK..."):
+    if st.button("Stáhnout polygon", type="primary"):
+        with st.spinner("Volám databázi RÚIAN..."):
             vysledek = stahni_parcelu_cuzk(ku_kod, kmen, pod)
             if isinstance(vysledek, list):
                 st.session_state['api_data'] = vysledek
@@ -73,22 +77,20 @@ with st.sidebar:
 
     st.write("---")
     st.subheader("🛠️ Debugger přijatých dat")
-    # Zde uvidíš surová data z API (v S-JTSK), pokud se to povede
     raw_data = st.session_state.get('api_data', [])
     if raw_data:
         st.text_area("S-JTSK souřadnice z API:", value=json.dumps(raw_data), height=150)
         display_pts = normalizuj_sjtsk(raw_data)
     else:
-        st.warning("Čekám na stažení dat...")
+        st.warning("Zatím nemám data. Klikni na 'Stáhnout'.")
         display_pts = []
 
 # --- 3D ENGINE ---
 st.title("📐 Skutečný model parcely z RÚIAN")
 
 if not display_pts:
-    st.info("Zadej parcelu v sidebaru a klikni na 'Stáhnout'.")
+    st.info("Zadej údaje v sidebaru a stáhni data z katastru.")
 else:
-    # Generování Three.js kódu pouze pokud máme reálná data
     three_js_code = f"""
     <div id="container" style="width: 100%; height: 700px; background: #ffffff; border: 1px solid #ddd; border-radius: 8px;"></div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -105,7 +107,7 @@ else:
 
         // KRESLENÍ POLYGONU
         const shape = new THREE.Shape();
-        // Osa Y ze S-JTSK jde často opačně, vkládáme jako -Y do 3D prostoru (osa Z)
+        // S-JTSK má jinou orientaci os, překlápíme pro 3D zobrazení
         shape.moveTo(pts[0][0], -pts[0][1]);
         for(let i=1; i<pts.length; i++) {{
             shape.lineTo(pts[i][0], -pts[i][1]);
@@ -122,6 +124,15 @@ else:
         const borderGeom = new THREE.BufferGeometry().setFromPoints(linePts);
         const border = new THREE.Line(borderGeom, new THREE.LineBasicMaterial({{ color: 0xd32f2f, linewidth: 3 }}));
         scene.add(border);
+
+        // DŮM - Zlatý standard (Modrý monolit)
+        const house = new THREE.Mesh(
+            new THREE.BoxGeometry(6.25, 2.7, 12.5),
+            new THREE.MeshPhongMaterial({{ color: 0x1976d2, transparent: true, opacity: 0.9 }})
+        );
+        house.position.set(0, 1.35, 0);
+        house.castShadow = true;
+        scene.add(house);
 
         // ZÁKLADNÍ MŘÍŽKA A SVĚTLO
         scene.add(new THREE.GridHelper(200, 200, 0xdddddd, 0xeeeeee));
