@@ -5,59 +5,74 @@ import streamlit.components.v1 as components
 RASTR = 0.625
 VYSKA = 2.7
 
-st.set_page_config(page_title="Matomas 3D Realtime", layout="wide")
+st.set_page_config(page_title="Matomas 3D Dispozice", layout="wide")
 
 with st.sidebar:
-    st.title("🧱 Parametry 3D")
-    mod_x = st.slider("Délka (moduly)", 10, 32, 20)
-    mod_y = st.slider("Šířka (moduly)", 8, 16, 10)
+    st.title("🧱 Parametry")
+    mod_x = st.slider("Délka (moduly)", 16, 32, 24)
+    mod_y = st.slider("Šířka (moduly)", 10, 16, 12)
+    pomer_denni = st.slider("Denní zóna (%)", 40, 60, 50) / 100
     
     sirka = round(mod_y * RASTR, 3)
     delka = round(mod_x * RASTR, 3)
+    
+    # Výpočet pozice hlavní příčky
+    moduly_denni = round((delka * pomer_denni) / RASTR)
+    pos_pricka = moduly_denni * RASTR
 
-st.title("🧊 Interaktivní 3D Model (Three.js)")
-st.write(f"Rozměr: {sirka} x {delka} m | Výška: {VYSKA} m")
+st.title("🏠 3D Náhled Dispozice")
+st.write(f"Trakt: {sirka}m | Denní část: {pos_pricka}m | Noční část: {round(delka - pos_pricka, 2)}m")
 
-# --- THREE.JS INTEGRACE ---
-# Tento kód vytvoří v prohlížeči skutečné 3D prostředí
-three_js_code = f"""
-<div id="container" style="width: 100%; height: 500px; background: #eeeeee; border-radius: 10px;"></div>
+# --- THREE.JS S VNITŘNÍMI STĚNAMI ---
+three_js_html = f"""
+<div id="three-container" style="width: 100%; height: 600px; background: #f0f2f6; border-radius: 15px;"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xeeeeee);
-    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / 500, 0.1, 1000);
+    scene.background = new THREE.Color(0xf0f2f6);
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / 600, 0.1, 1000);
     const renderer = new THREE.WebGLRenderer({{ antialias: true }});
-    renderer.setSize(window.innerWidth, 500);
-    document.getElementById('container').appendChild(renderer.domElement);
+    renderer.setSize(window.innerWidth, 600);
+    document.getElementById('three-container').appendChild(renderer.domElement);
 
-    // Světla
-    const light = new THREE.DirectionalLight(0xffffff, 1);
-    light.position.set(5, 10, 7.5).normalize();
-    scene.add(light);
-    scene.add(new THREE.AmbientLight(0x404040));
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(10, 20, 10);
+    scene.add(dirLight);
 
-    // DŮM (Box)
-    const geometry = new THREE.BoxGeometry({sirka}, {VYSKA}, {delka});
-    const material = new THREE.MeshPhongMaterial({{ color: 0x3498db, transparent: true, opacity: 0.8, edgeColor: 0x000000 }});
-    const house = new THREE.Mesh(geometry, material);
-    house.position.y = {VYSKA}/2;
-    scene.add(house);
+    // FUNKCE PRO TVORBU STĚN
+    function createWall(w, h, d, x, y, z, color=0xcccccc, opacity=1) {{
+        const geom = new THREE.BoxGeometry(w, h, d);
+        const mat = new THREE.MeshPhongMaterial({{ color: color, transparent: opacity < 1, opacity: opacity }});
+        const mesh = new THREE.Mesh(geom, mat);
+        mesh.position.set(x, y, z);
+        scene.add(mesh);
+        
+        const edges = new THREE.EdgesGeometry(geom);
+        const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({{ color: 0x000000 }}));
+        line.position.set(x, y, z);
+        scene.add(line);
+    }}
 
-    // Drátěný model (Edges)
-    const edges = new THREE.EdgesGeometry(geometry);
-    const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({{ color: 0x000000 }}));
-    line.position.y = {VYSKA}/2;
-    scene.add(line);
+    // 1. OBVODOVÉ STĚNY (Průhledné pro náhled dovnitř)
+    createWall({sirka}, {VYSKA}, {delka}, 0, {VYSKA}/2, 0, 0x3498db, 0.2);
 
-    // Země (Rastr)
-    const grid = new THREE.GridHelper(20, 20);
+    // 2. HLAVNÍ DĚLÍCÍ PŘÍČKA (Zlatý Standard)
+    createWall({sirka}, {VYSKA}, 0.25, 0, {VYSKA}/2, -{delka}/2 + {pos_pricka});
+
+    // 3. CHODBA (svislá v noční zóně)
+    const sirka_chodby = {2 * RASTR};
+    const delka_nocni = {delka} - {pos_pricka};
+    createWall(0.125, {VYSKA}, delka_nocni, {sirka}/2 - sirka_chodby, {VYSKA}/2, {delka}/2 - delka_nocni/2);
+
+    // 4. PODLAHA (Rastr)
+    const grid = new THREE.GridHelper(30, 30, 0x888888, 0xcccccc);
     scene.add(grid);
 
     camera.position.set({sirka}*2, {VYSKA}*2, {delka}*2);
     const controls = new THREE.OrbitControls(camera, renderer.domElement);
-
+    
     function animate() {{
         requestAnimationFrame(animate);
         controls.update();
@@ -67,6 +82,4 @@ three_js_code = f"""
 </script>
 """
 
-components.html(three_js_code, height=520)
-
-st.info("💡 Myší můžete modelem otáčet a kolečkem zoomovat.")
+components.html(three_js_html, height=620)
