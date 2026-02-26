@@ -1,117 +1,110 @@
 import streamlit as st
 import ezdxf
 import io
+import matplotlib.pyplot as plt
 
-# --- KONSTRUKČNÍ LOGIKA DLE TVÉHO ZADÁNÍ ---
-def vypocitej_projekt(sirka, delka):
+# --- KONFIGURACE KONSTRUKCÍ ---
+STAVEBNI_SYSTEMY = {
+    "Zlatý Standard (Monolit)": {
+        "zed_tloustka": 0.250, 
+        "zatepleni": 0.180, 
+        "cena_m2": 55000,
+        "popis": "Betonové tvarovky, armování, monolitický strop. Maximální tuhost."
+    },
+    "Cihla (Jednovrstvá)": {
+        "zed_tloustka": 0.440, 
+        "zatepleni": 0.0, 
+        "cena_m2": 58000,
+        "popis": "Broušená cihla bez zateplení. Klasická cesta."
+    },
+    "Dřevostavba (2by4)": {
+        "zed_tloustka": 0.140, 
+        "zatepleni": 0.200, 
+        "cena_m2": 48000,
+        "popis": "Lehký dřevěný skelet. Rychlá stavba, nízká akumulace."
+    }
+}
+
+def vypocitej_projekt(sirka, delka, system_name):
+    sys = STAVEBNI_SYSTEMY[system_name]
     plocha = sirka * delka
     obvod = 2 * (sirka + delka)
     
-    # 1. Spodní stavba
-    beton_pasy = obvod * 0.4 * 0.2  # pasy 400x200
-    zb_ks = (obvod / 0.5) * 2       # 2 šáry ztraceného bednění 250mm
-    beton_vypln_zb = zb_ks * 0.02   # orientační výplň na kus
-    beton_deska = plocha * 0.15     # deska 150mm
+    # Výpočet ceny na základě plochy a zvoleného systému
+    cena_zakladni = plocha * sys["cena_m2"]
     
-    # Výztuž (sítě 8/100/100 2x + 20% rezerva na pruty)
-    ocel_kg = (plocha * 7.9 * 1.3) + (obvod * 5)
-    
-    # 2. Svislé konstrukce
-    plocha_sten = obvod * 2.7       # výška 2.7m
-    beton_tvarovky_ks = plocha_sten / 0.125 # tvarovky 500x250
-    beton_vypln_sten = plocha_sten * 0.15 # výplň betonem C25/30
-    
-    # 3. Strop a Střecha
-    beton_strop = plocha * 0.15     # monolit 150mm
-    fosny_m = (plocha / 0.4) * 1.1  # fošny á 400mm s prořezem
-    osb_m2 = plocha * 2             # 2 vrstvy 18mm
-    
-    # 4. Izolace
-    eps_fasada_m2 = plocha_sten
-    eps_podlaha_m3 = plocha * 0.16
-    vata_strop_m2 = plocha
-    
-    # --- Ceny (orientační pro rok 2026) ---
-    c_beton = 3300  # C25/30 za m3
-    c_ocel = 32     # za kg
-    c_eps = 2500    # za m3
-    
-    cena_material = (beton_pasy + beton_deska + beton_vypln_sten + beton_strop) * c_beton
-    cena_material += ocel_kg * c_ocel
-    
-    # Celková cena (materiál + práce + tvých 15% rezerva)
-    cena_celkem = cena_material * 1.8 # koeficient pro práci a režii
+    # Technické detaily (zjednodušeně pro demo)
+    beton_m3 = (plocha * 0.15) + (obvod * 0.4 * 0.2)
+    ocel_kg = (plocha * 7.9 * 1.3)
     
     return {
-        "Cena celkem": f"{round(cena_celkem):,} Kč",
-        "Beton celkem (m3)": round(beton_pasy + beton_deska + beton_vypln_sten + beton_strop, 1),
-        "Ocel celkem (kg)": round(ocel_kg),
-        "Ztracené bednění (ks)": round(zb_ks),
-        "Fošny na střechu (m)": round(fosny_m)
+        "Cena celkem": f"{round(cena_zakladni):,} Kč",
+        "Beton (m3)": round(beton_m3, 1),
+        "Ocel (kg)": round(ocel_kg),
+        "Vnější rozměr": f"{sirka + 2*sys['zatepleni']:.2f} x {delka + 2*sys['zatepleni']:.2f} m"
     }
 
 # --- WEBOWÉ ROZHRANÍ ---
 st.set_page_config(page_title="Matomas AI Ateliér", layout="wide")
 
-st.title("🏗️ Matomas AI Ateliér - Zlatý Standard")
-st.write("Parametrický návrh domu v rastru 625 mm s přesným technickým výpočtem.")
+st.title("🏗️ Matomas AI Ateliér - verze 0.2")
 
 with st.sidebar:
-    st.header("Nastavení rozměrů")
-    # Posuvníky nastavené na násobky 0.625 m
-    mod_x = st.slider("Počet modulů - délka", 10, 32, 20) # 6.25m až 20m
-    mod_y = st.slider("Počet modulů - šířka", 8, 16, 10)  # 5m až 10m
+    st.header("1. Parametry domu")
+    mod_x = st.slider("Délka (modul 625mm)", 10, 32, 20)
+    mod_y = st.slider("Šířka (modul 625mm)", 8, 16, 10)
     
-    sirka_m = mod_y * 0.625
-    delka_m = mod_x * 0.625
+    sirka = mod_y * 0.625
+    delka = mod_x * 0.625
     
-    st.info(f"Rozměr hrubé stavby: {sirka_m} x {delka_m} m")
-    st.info(f"Vnější rozměr (zateplení 180mm): {sirka_m + 0.36} x {delka_m + 0.36} m")
+    st.header("2. Konstrukce")
+    system_choice = st.selectbox("Vyberte systém", list(STAVEBNI_SYSTEMY.keys()))
+    st.caption(STAVEBNI_SYSTEMY[system_choice]["popis"])
 
-# Výpočet
-vysledky = vypocitej_projekt(sirka_m, delka_m)
+# Data a výpočty
+vysledky = vypocitej_projekt(sirka, delka, system_choice)
 
-# Zobrazení výsledků
-col1, col2 = st.columns([2, 1])
+# --- VIZUALIZACE PŮDORYSU ---
+col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("Ekonomický a materiálový přehled")
-    # Zobrazení metrik v pěkné mřížce
-    c1, c2, c3 = st.columns(3)
-    for i, (k, v) in enumerate(vysledky.items()):
-        if i < 3:
-            with [c1, c2, c3][i]: st.metric(k, v)
-        else:
-            st.write(f"**{k}:** {v}")
+    st.subheader("Náhled půdorysu (Hrubá stavba)")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    # Vnější obrys
+    rect = plt.Rectangle((0, 0), sirka, delka, linewidth=3, edgecolor='black', facecolor='none')
+    ax.add_patch(rect)
+    
+    # Rastr 625mm (jemné linky)
+    for x in [i * 0.625 for i in range(int(sirka/0.625) + 1)]:
+        ax.axvline(x, color='gray', lw=0.5, ls='--')
+    for y in [i * 0.625 for i in range(int(delka/0.625) + 1)]:
+        ax.axhline(y, color='gray', lw=0.5, ls='--')
+        
+    ax.set_xlim(-1, sirka + 1)
+    ax.set_ylim(-1, delka + 1)
+    ax.set_aspect('equal')
+    ax.set_title(f"Hrubý rozměr: {sirka} x {delka} m")
+    st.pyplot(fig)
 
 with col2:
-    st.subheader("Technická specifikace")
-    st.markdown("""
-    * **Základy:** Pasy 400x200 + ZB 250mm
-    * **Konstrukce:** Betonové tvarovky + monolitický strop
-    * **Střecha:** Fošnový systém, 2x OSB, asfaltové pásy, kačírek
-    * **Izolace:** Fasáda 180mm EPS, Podlaha 160mm EPS, Strop 240mm vata
-    """)
+    st.subheader("Ekonomika a technika")
+    c1, c2 = st.columns(2)
+    c1.metric("Odhadovaná cena", vysledky["Cena celkem"])
+    c2.metric("Vnější rozměr s fasádou", vysledky["Vnější rozměr"])
+    
+    st.write("---")
+    st.write(f"**Materiálový odhad pro {system_choice}:**")
+    st.write(f"- Beton: {vysledky['Beton (m3)']} m3")
+    st.write(f"- Ocel: {vysledky['Ocel (kg)']} kg")
 
-# --- GENEROVÁNÍ DXF ---
-if st.button("💾 Stáhnout DXF Studii"):
+# --- DXF EXPORT ---
+if st.button("💾 Exportovat DXF studii"):
     doc = ezdxf.new('R2010')
     msp = doc.modelspace()
+    s_mm, d_mm = sirka * 1000, delka * 1000
+    msp.add_lwpolyline([(0, 0), (s_mm, 0), (s_mm, d_mm), (0, d_mm), (0, 0)], dxfattribs={'color': 7})
     
-    # Body v milimetrech pro CAD
-    s = sirka_m * 1000
-    d = delka_m * 1000
-    
-    # Vnější obvod hrubé stavby
-    msp.add_lwpolyline([(0, 0), (s, 0), (s, d), (0, d), (0, 0)], dxfattribs={'color': 7})
-    
-    # Uložení do bufferu pro stažení
     out = io.StringIO()
     doc.write(out)
-    
-    st.download_button(
-        label="Klikněte pro stažení souboru .dxf",
-        data=out.getvalue(),
-        file_name="studie_matomas.dxf",
-        mime="application/dxf"
-    )
+    st.download_button("Klikněte pro stažení DXF", data=out.getvalue(), file_name="studie.dxf")
