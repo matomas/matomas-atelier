@@ -1,30 +1,38 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import json
+from shapely.geometry import Polygon
 
 st.set_page_config(page_title="Matomas Site Intelligence", layout="wide")
 
 with st.sidebar:
     st.title("🗺️ Katastrální data")
-    st.write("Simulace importu z katastru (WFS/GML)")
-    
-    # Testovací souřadnice šišatého pozemku (v metrech)
-    # Představ si, že tohle nám přišlo z API katastru
     default_coords = "[ [0,0], [25,5], [22,35], [-5,30], [0,0] ]"
-    coords_json = st.text_area("Souřadnice bodů pozemku [x,y]", value=default_coords)
-    
-    odstup = st.slider("Zákonný odstup (m)", 2.0, 7.0, 3.0)
+    coords_json = st.text_area("Souřadnice bodů [x,y]", value=default_coords)
+    odstup_val = st.slider("Zákonný odstup (m)", 2.0, 7.0, 3.0)
 
+# LOGIKA GEOMETRIE (Shapely)
 try:
-    points = json.loads(coords_json)
-except:
-    st.error("Chyba ve formátu souřadnic!")
-    points = [[0,0], [20,0], [20,20], [0,20]]
+    pts = json.loads(coords_json)
+    poly = Polygon(pts)
+    
+    # Tady se děje to kouzlo: záporný buffer vytvoří vnitřní odstup
+    inner_poly = poly.buffer(-odstup_val, join_style=2) # join_style 2 = ostré rohy
+    
+    # Převedeme zpět na seznam bodů pro Three.js
+    if not inner_poly.is_empty:
+        inner_pts = list(inner_poly.exterior.coords)
+    else:
+        inner_pts = []
+        st.warning("Odstup je příliš velký, na pozemku nelze stavět!")
+except Exception as e:
+    st.error(f"Chyba výpočtu: {e}")
+    pts = [[0,0], [20,0], [20,20], [0,20]]
+    inner_pts = []
 
-st.title("📐 Analýza nepravidelné parcely")
-st.info("Algoritmus nyní počítá 'stavební čáru' pro libovolný polygon.")
+st.title("📐 Analýza stavební čáry")
 
-# --- THREE.JS GENERÁTOR PRO ŠIŠATÝ POZEMEK ---
+# --- THREE.JS GENERÁTOR ---
 three_js_code = f"""
 <div id="container" style="width: 100%; height: 600px; background: #f0f2f6; border-radius: 15px;"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -37,27 +45,27 @@ three_js_code = f"""
     renderer.setSize(window.innerWidth, 600);
     document.getElementById('container').appendChild(renderer.domElement);
 
-    const pts = {points};
+    // 1. CELÝ POZEMEK (Zelený)
+    const pts = {pts};
     const shape = new THREE.Shape();
     shape.moveTo(pts[0][0], pts[0][1]);
-    for(let i=1; i < pts.length; i++) {{
-        shape.lineTo(pts[i][0], pts[i][1]);
-    }}
-
-    // 1. POZEMEK (Shape)
-    const geometry = new THREE.ShapeGeometry(shape);
-    const material = new THREE.MeshBasicMaterial({{ color: 0x9edb9e, side: THREE.DoubleSide }});
-    const mesh = new THREE.Mesh(geometry, material);
+    pts.forEach(p => shape.lineTo(p[0], p[1]));
+    
+    const geom = new THREE.ShapeGeometry(shape);
+    const mat = new THREE.MeshBasicMaterial({{ color: 0x9edb9e, side: THREE.DoubleSide }});
+    const mesh = new THREE.Mesh(geom, mat);
     mesh.rotation.x = -Math.PI / 2;
     scene.add(mesh);
 
-    // 2. OBRYS (Černá čára)
-    const points_vec = pts.map(p => new THREE.Vector3(p[0], 0.01, -p[1]));
-    const lineGeom = new THREE.BufferGeometry().setFromPoints(points_vec);
-    const line = new THREE.Line(lineGeom, new THREE.LineBasicMaterial({{ color: 0x000000, linewidth: 2 }}));
-    scene.add(line);
+    // 2. STAVEBNÍ ČÁRA (Červená)
+    const i_pts = {inner_pts};
+    if (i_pts.length > 0) {{
+        const i_points_vec = i_pts.map(p => new THREE.Vector3(p[0], 0.05, -p[1]));
+        const i_lineGeom = new THREE.BufferGeometry().setFromPoints(i_points_vec);
+        const i_line = new THREE.Line(i_lineGeom, new THREE.LineBasicMaterial({{ color: 0xff0000, linewidth: 3 }}));
+        scene.add(i_line);
+    }}
 
-    // Světlo a kamera
     scene.add(new THREE.AmbientLight(0xffffff, 0.8));
     camera.position.set(20, 40, 20);
     new THREE.OrbitControls(camera, renderer.domElement);
