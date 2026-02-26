@@ -3,7 +3,13 @@ import streamlit.components.v1 as components
 import requests
 import json
 
-st.set_page_config(page_title="Matomas Site Intelligence v0.41", layout="wide")
+st.set_page_config(page_title="Matomas Site Intelligence v0.42", layout="wide")
+
+# --- MASKOVÁNÍ PROTI 403 FORBIDDEN ---
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Referer": "https://ags.cuzk.gov.cz/"
+}
 
 # --- 1. STAŽENÍ HLAVNÍ PARCELY (S-JTSK) ---
 def stahni_parcelu_cuzk_sjtsk(ku_kod, kmen, pod):
@@ -14,7 +20,7 @@ def stahni_parcelu_cuzk_sjtsk(ku_kod, kmen, pod):
     
     params = {"where": where_clause, "outFields": "objectid", "returnGeometry": "true", "outSR": "5514", "f": "json"}
     try:
-        res = requests.get(url, params=params, timeout=15)
+        res = requests.get(url, params=params, headers=HEADERS, timeout=15)
         if res.status_code == 200:
             data = res.json()
             if "features" in data and len(data["features"]) > 0:
@@ -29,31 +35,20 @@ def stahni_okoli_sjtsk(cx_orig, cy_orig, layer_id, out_fields="objectid"):
     url = f"https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/{layer_id}/query"
     params = {"geometry": f"{xmin},{ymin},{xmax},{ymax}", "geometryType": "esriGeometryEnvelope", "inSR": "5514", "spatialRel": "esriSpatialRelIntersects", "outFields": out_fields, "returnGeometry": "true", "outSR": "5514", "f": "json"}
     try:
-        res = requests.get(url, params=params, timeout=15)
+        res = requests.get(url, params=params, headers=HEADERS, timeout=15)
         if res.status_code == 200: return res.json().get("features", [])
     except: pass
     return []
 
-# --- 3. STAŽENÍ VÝŠKOPISU DMR 5G (OPRAVENO) ---
+# --- 3. STAŽENÍ VÝŠKOPISU DMR 5G (MASKED POST) ---
 def stahni_dmr5g(pts_sjtsk):
-    # Přesný endpoint na arcgis2 clusteru, který reálně podporuje operaci 'getSamples'
     url = "https://ags.cuzk.gov.cz/arcgis2/rest/services/dmr5g/ImageServer/getSamples"
-    
-    geom = {
-        "points": pts_sjtsk,
-        "spatialReference": {"wkid": 5514}
-    }
-    
-    data = {
-        "geometry": json.dumps(geom),
-        "geometryType": "esriGeometryMultipoint",
-        "returnFirstValueOnly": "true",
-        "f": "json"
-    }
+    geom = {"points": pts_sjtsk, "spatialReference": {"wkid": 5514}}
+    data = {"geometry": json.dumps(geom), "geometryType": "esriGeometryMultipoint", "returnFirstValueOnly": "true", "f": "json"}
     
     try:
-        res = requests.post(url, data=data, timeout=15)
-        # Záchyt odpovědi pro diagnostiku, i když selže
+        # Tady ležel ten 403 Forbidden problém. S hlavičkou to projde.
+        res = requests.post(url, data=data, headers=HEADERS, timeout=15)
         st.session_state['terrain_debug'] = res.text 
         
         if res.status_code == 200:
@@ -104,7 +99,7 @@ with st.sidebar:
     nacteni_teren = st.checkbox("Načíst 3D terén (DMR 5G)", value=True)
         
     if st.button("Stáhnout a Analyzovat", type="primary"):
-        with st.spinner("Stahuji zástavbu a mapuji 3D terén..."):
+        with st.spinner("Lamu firewall a stahuji 3D data..."):
             raw_main = stahni_parcelu_cuzk_sjtsk(ku_kod, kmen, pod)
             if raw_main:
                 main_met, cx, cy = center_sjtsk(raw_main)
@@ -138,7 +133,6 @@ with st.sidebar:
                 
                 # DMR 5G Terén
                 if nacteni_teren:
-                    # Mřížka 21x21 (441 bodů na proscanování)
                     grid_size = 21
                     W_terrain, H_terrain = 100, 100
                     xmin_t, xmax_t = -50, 50
@@ -178,14 +172,14 @@ with st.sidebar:
     rotace = st.slider("Natočení domu (°)", 0, 360, 0)
     
     if st.session_state.get('terrain'):
-        st.success(f"Kóta 0.000 (střed parcely) = **{st.session_state['terrain']['z_nula']:.2f} m n.m. (Bpv)**")
+        st.success(f"Kóta 0.000 = **{st.session_state['terrain']['z_nula']:.2f} m n.m. (Bpv)**")
     elif nacteni_teren:
         st.warning("Terén se nepodařilo stáhnout.")
         with st.expander("Výpis chyby API ČÚZK"):
             st.code(st.session_state.get('terrain_debug', 'Žádná data neuložena.'), language='text')
 
 # --- 3D ENGINE ---
-st.title("🏡 Architektonická situace (v0.41)")
+st.title("🏡 Architektonická situace (v0.42)")
 
 main_pts = st.session_state.get('main_pts', [])
 neighbors = st.session_state.get('neighbors', [])
@@ -195,9 +189,7 @@ terrain_data = st.session_state.get('terrain', None)
 if not main_pts:
     st.info("Zadej parcelu a klikni na 'Stáhnout a Analyzovat'.")
 else:
-    # Matematická oprava, aby JavaScript nezpanikařil ze dvou mínusů za sebou
     safe_z = -1 * pos_z
-    
     three_js_code = f"""
     <div id="container" style="width: 100%; height: 750px; background: #ffffff; border: 1px solid #ddd; border-radius: 8px;"></div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -252,7 +244,7 @@ else:
             return sum > 0;
         }}
 
-        // 0. DMR 5G TERÉN (Zelený Wireframe propisující se objekty)
+        // 0. DMR 5G TERÉN (Zelený Wireframe)
         if (tData) {{
             const tGeom = new THREE.PlaneGeometry(tData.w, tData.h, 20, 20);
             const tVerts = tGeom.attributes.position.array;
@@ -269,7 +261,7 @@ else:
             scene.add(new THREE.GridHelper(300, 300, 0xdddddd, 0xf0f0f0));
         }}
 
-        // 1. OKOLNÍ PARCELY A CESTY
+        // 1. OKOLNÍ PARCELY
         nbrs.forEach(n => {{
             const nShape = new THREE.Shape();
             nShape.moveTo(n.polygon[0][0], n.polygon[0][1]);
@@ -279,11 +271,9 @@ else:
             nMesh.rotation.x = -Math.PI / 2;
             nMesh.position.y = -0.02;
             scene.add(nMesh);
-
             const nLinePts = n.polygon.map(p => new THREE.Vector3(p[0], -0.01, -p[1]));
             nLinePts.push(nLinePts[0]);
-            const nBorder = new THREE.Line(new THREE.BufferGeometry().setFromPoints(nLinePts), new THREE.LineBasicMaterial({{ color: 0xbdbdbd, linewidth: 1 }}));
-            scene.add(nBorder);
+            scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(nLinePts), new THREE.LineBasicMaterial({{ color: 0xbdbdbd, linewidth: 1 }})));
         }});
 
         // 2. HLAVNÍ PARCELA
@@ -292,29 +282,24 @@ else:
         for(let i=1; i<pts.length; i++) {{ shape.lineTo(pts[i][0], pts[i][1]); }}
         const parcel = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshPhongMaterial({{ color: 0xc8e6c9, side: THREE.DoubleSide, transparent: true, opacity: 0.8 }}));
         parcel.rotation.x = -Math.PI / 2;
-        parcel.receiveShadow = true;
         scene.add(parcel);
-
         const linePts = pts.map(p => new THREE.Vector3(p[0], 0.05, -p[1]));
         linePts.push(linePts[0]);
         scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(linePts), new THREE.LineBasicMaterial({{ color: 0xd32f2f, linewidth: 3 }})));
 
-        // 3. FIXNÍ STAVEBNÍ ČÁRA (+2.0m)
+        // 3. STAVEBNÍ ČÁRA
         const signMain = isClockwise(pts) ? -1 : 1; 
         const offPts = getOffsetPoints(pts, 2.0 * signMain);
-        const offLine = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(offPts), new THREE.LineBasicMaterial({{ color: 0xff9800, linewidth: 2 }}));
-        scene.add(offLine);
+        scene.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(offPts), new THREE.LineBasicMaterial({{ color: 0xff9800, linewidth: 2 }})));
 
         // 4. BUDOVY A POŽÁRNÍ ZÓNY
         bldgs.forEach(b => {{
             const bShape = new THREE.Shape();
             bShape.moveTo(b[0][0], b[0][1]);
             for(let i=1; i<b.length; i++) {{ bShape.lineTo(b[i][0], b[i][1]); }}
-            
             const bMesh = new THREE.Mesh(new THREE.ExtrudeGeometry(bShape, {{ depth: 4.0, bevelEnabled: false }}), new THREE.MeshPhongMaterial({{ color: 0x78909c, transparent: true, opacity: 0.85 }}));
             bMesh.rotation.x = -Math.PI / 2;
             bMesh.position.y = 0;
-            bMesh.castShadow = true;
             scene.add(bMesh);
             
             const sign = isClockwise(b) ? 1 : -1; 
@@ -327,19 +312,17 @@ else:
             scene.add(off7Line);
         }});
 
-        // 5. TVŮJ DŮM (4m výška)
+        // 5. TVŮJ DŮM
         const houseGeom = new THREE.BoxGeometry(6.25, 4.0, 12.5);
         const houseMat = new THREE.MeshPhongMaterial({{ color: 0x1976d2, transparent: true, opacity: 0.9 }});
         const house = new THREE.Mesh(houseGeom, houseMat);
         house.position.set({pos_x}, {vyska + 2.0}, {safe_z});
         house.rotation.y = ({rotace} * Math.PI) / 180;
-        house.castShadow = true;
         scene.add(house);
 
         scene.add(new THREE.AmbientLight(0xffffff, 0.7));
         const sun = new THREE.DirectionalLight(0xffffff, 0.7);
         sun.position.set(50, 100, 50);
-        sun.castShadow = true;
         scene.add(sun);
 
         camera.position.set(40, 70, 40);
