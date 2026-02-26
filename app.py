@@ -42,7 +42,7 @@ def stahni_okoli_sjtsk(cx_orig, cy_orig, layer_id, out_fields="objectid"):
 
 # --- 3. STAŽENÍ VÝŠKOPISU DMR 5G (MASKED POST) ---
 def stahni_dmr5g(pts_sjtsk):
-    url = "https://nucnicky.cz/cuzk_proxy.php"
+    url = "http://nucnicky.cz/cuzk_proxy.php"
     geom = {"points": pts_sjtsk, "spatialReference": {"wkid": 5514}}
     data = {"geometry": json.dumps(geom), "geometryType": "esriGeometryMultipoint", "returnFirstValueOnly": "true", "f": "json"}
     
