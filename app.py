@@ -3,7 +3,7 @@ import streamlit.components.v1 as components
 import requests
 import json
 
-st.set_page_config(page_title="Matomas Site Intelligence v0.35", layout="wide")
+st.set_page_config(page_title="Matomas Site Intelligence v0.36", layout="wide")
 
 # --- 1. STAŽENÍ HLAVNÍ PARCELY ---
 def stahni_parcelu_cuzk(ku_kod, kmen, pod):
@@ -11,7 +11,6 @@ def stahni_parcelu_cuzk(ku_kod, kmen, pod):
     where_clause = f"katastralniuzemi={ku_kod} AND kmenovecislo={kmen}"
     if pod and pod.strip() != "": where_clause += f" AND poddelenicisla={pod}"
     else: where_clause += " AND poddelenicisla IS NULL"
-        
     params = {"where": where_clause, "outFields": "objectid", "returnGeometry": "true", "f": "geojson"}
     try:
         res = requests.get(url, params=params, timeout=15)
@@ -22,16 +21,16 @@ def stahni_parcelu_cuzk(ku_kod, kmen, pod):
     except: pass
     return None
 
-# --- 2. STAŽENÍ OKOLNÍCH PARCEL (KONTEXT) ---
-def stahni_okoli(xmin, ymin, xmax, ymax):
-    url = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/5/query"
-    # Vyžádáme si parcely, které se nacházejí v našem výřezu
+# --- 2. STAŽENÍ OKOLNÍCH PARCEL A BUDOV ---
+def stahni_okoli(xmin, ymin, xmax, ymax, layer_id, out_fields="objectid"):
+    # Univerzální stahovač pro libovolnou vrstvu
+    url = f"https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/{layer_id}/query"
     params = {
         "geometry": f"{xmin},{ymin},{xmax},{ymax}",
         "geometryType": "esriGeometryEnvelope",
-        "inSR": "4326", # WGS84
+        "inSR": "4326",
         "spatialRel": "esriSpatialRelIntersects",
-        "outFields": "druhpozemkukod", # Kód 14 = Ostatní plocha (ulice, cesty)
+        "outFields": out_fields,
         "returnGeometry": "true",
         "f": "geojson"
     }
@@ -42,7 +41,7 @@ def stahni_okoli(xmin, ymin, xmax, ymax):
     except: pass
     return []
 
-# --- 3. PŘEVOD DO METRŮ (Společný střed pro všechno) ---
+# --- 3. PŘEVOD DO METRŮ ---
 def prevod_do_metru(pts, cx=None, cy=None):
     if not cx or not cy:
         lons = [p[0] for p in pts]
@@ -59,67 +58,81 @@ def prevod_do_metru(pts, cx=None, cy=None):
 
 # --- UI ---
 with st.sidebar:
-    st.title("📡 Živý Katastr s kontextem")
+    st.title("🔥 Požární a Urbanistický Kontext")
     
     ku_kod = st.text_input("Kód KÚ", value="768031")
     col1, col2 = st.columns(2)
     with col1: kmen = st.text_input("Kmenové č.", value="45")
     with col2: pod = st.text_input("Pododdělení", value="104")
     
-    nacteni_okoli = st.checkbox("Detekovat komunikace a sousedy", value=True)
+    st.write("---")
+    nacteni_okoli = st.checkbox("Detekovat cesty (Okolí)", value=True)
+    nacteni_budov = st.checkbox("Detekovat okolní domy (Požární zóny)", value=True)
         
-    if st.button("Stáhnout a analyzovat", type="primary"):
-        with st.spinner("Stahuji data a analyzuji okolí..."):
+    if st.button("Analyzovat limity", type="primary"):
+        with st.spinner("Stahuji data, budovy a počítám zóny..."):
             raw_main = stahni_parcelu_cuzk(ku_kod, kmen, pod)
             if raw_main:
-                # 1. Hlavní parcela
                 main_met, cx, cy = prevod_do_metru(raw_main)
                 st.session_state['main_pts'] = main_met
                 
-                # 2. Okolí a komunikace
+                # Rozšiřujeme "výhled" o cca 30 metrů
+                margin = 0.0004 
+                xmin = min([p[0] for p in raw_main]) - margin
+                ymin = min([p[1] for p in raw_main]) - margin
+                xmax = max([p[0] for p in raw_main]) + margin
+                ymax = max([p[1] for p in raw_main]) + margin
+                
+                # 1. Komunikace (Vrstva 5)
                 neighbors_data = []
                 if nacteni_okoli:
-                    # Rozšíříme bounding box o cca 20 metrů do všech stran (0.0003 stupně)
-                    margin = 0.0003
-                    xmin = min([p[0] for p in raw_main]) - margin
-                    ymin = min([p[1] for p in raw_main]) - margin
-                    xmax = max([p[0] for p in raw_main]) + margin
-                    ymax = max([p[1] for p in raw_main]) + margin
-                    
-                    okoli_features = stahni_okoli(xmin, ymin, xmax, ymax)
+                    okoli_features = stahni_okoli(xmin, ymin, xmax, ymax, 5, "druhpozemkukod")
                     for feat in okoli_features:
                         props = feat.get("properties", {})
                         geom = feat.get("geometry", {})
                         if geom and "coordinates" in geom and len(geom["coordinates"]) > 0:
                             n_raw = geom["coordinates"][0]
-                            # Ignorujeme naši vlastní parcelu v okolí
                             if n_raw == raw_main: continue 
                             n_met, _, _ = prevod_do_metru(n_raw, cx, cy)
-                            
-                            # Logika AI architekta: Druh pozemku 14 = Ostatní plocha (cesty, zeleň)
                             is_road = props.get("druhpozemkukod") == 14 
                             neighbors_data.append({"polygon": n_met, "is_road": is_road})
-                
                 st.session_state['neighbors'] = neighbors_data
-                st.success("Kompletní kontext načten!")
+
+                # 2. Budovy a stavební objekty (Vrstva 3)
+                budovy_data = []
+                if nacteni_budov:
+                    budovy_features = stahni_okoli(xmin, ymin, xmax, ymax, 3)
+                    for feat in budovy_features:
+                        geom = feat.get("geometry", {})
+                        if geom and "coordinates" in geom and len(geom["coordinates"]) > 0:
+                            coords = geom["coordinates"]
+                            if feat["geometry"]["type"] == "MultiPolygon":
+                                coords = coords[0]
+                            if len(coords) > 0:
+                                b_raw = coords[0]
+                                b_met, _, _ = prevod_do_metru(b_raw, cx, cy)
+                                budovy_data.append(b_met)
+                st.session_state['budovy'] = budovy_data
+                
+                st.success("Kompletní požární a urbanistický kontext načten!")
             else:
                 st.error("Chyba: Parcelu se nepodařilo stáhnout.")
 
     st.write("---")
-    st.subheader("📐 Limity a Osazení")
-    odstup = st.slider("Zákonný odstup (m)", -10.0, 10.0, -3.0, step=0.5)
+    st.subheader("📐 Osazení tvého domu")
     pos_x = st.slider("Posun domu X", -30.0, 30.0, 0.0)
     pos_z = st.slider("Posun domu Z", -30.0, 30.0, 0.0)
     rotace = st.slider("Natočení domu (°)", 0, 360, 0)
 
 # --- 3D ENGINE ---
-st.title("🏡 Urbanistický kontext (v0.35)")
+st.title("🏡 Analýza PNP - Požárních zón (v0.36)")
 
 main_pts = st.session_state.get('main_pts', [])
 neighbors = st.session_state.get('neighbors', [])
+budovy = st.session_state.get('budovy', [])
 
 if not main_pts:
-    st.info("Zadej parcelu a stáhni data pro zobrazení urbanistického kontextu.")
+    st.info("Zadej parcelu a stáhni data pro zobrazení požárního kontextu.")
 else:
     three_js_code = f"""
     <div id="container" style="width: 100%; height: 750px; background: #ffffff; border: 1px solid #ddd; border-radius: 8px;"></div>
@@ -131,51 +144,40 @@ else:
         const camera = new THREE.PerspectiveCamera(45, window.innerWidth / 750, 0.1, 5000);
         const renderer = new THREE.WebGLRenderer({{ antialias: true }});
         renderer.setSize(window.innerWidth, 750);
+        renderer.shadowMap.enabled = true;
         document.getElementById('container').appendChild(renderer.domElement);
 
         const pts = {main_pts};
         const nbrs = {json.dumps(neighbors)};
-        const offsetDist = {odstup};
+        const bldgs = {json.dumps(budovy)};
 
-        // 1. KRESLENÍ OKOLNÍCH PARCEL A ULIC
+        // 1. OKOLNÍ PARCELY A CESTY
         nbrs.forEach(n => {{
             const nShape = new THREE.Shape();
             nShape.moveTo(n.polygon[0][0], -n.polygon[0][1]);
             for(let i=1; i<n.polygon.length; i++) {{ nShape.lineTo(n.polygon[i][0], -n.polygon[i][1]); }}
-            
-            // Pokud je to cesta (kód 14), je tmavší šedá. Normální soused je světle šedá.
             const color = n.is_road ? 0x9e9e9e : 0xe0e0e0;
-            const nGeom = new THREE.ShapeGeometry(nShape);
-            const nMat = new THREE.MeshPhongMaterial({{ color: color, side: THREE.DoubleSide, transparent: true, opacity: 0.4 }});
-            const nMesh = new THREE.Mesh(nGeom, nMat);
+            const nMesh = new THREE.Mesh(new THREE.ShapeGeometry(nShape), new THREE.MeshPhongMaterial({{ color: color, side: THREE.DoubleSide, transparent: true, opacity: 0.4 }}));
             nMesh.rotation.x = -Math.PI / 2;
-            nMesh.position.y = -0.02; // Lehce pod hlavní parcelou, aby se nepraly plochy
+            nMesh.position.y = -0.02;
+            nMesh.receiveShadow = true;
             scene.add(nMesh);
-            
-            // Jemné hranice sousedů
-            const nLinePts = n.polygon.map(p => new THREE.Vector3(p[0], -0.01, -p[1]));
-            nLinePts.push(nLinePts[0]);
-            const nBorder = new THREE.Line(new THREE.BufferGeometry().setFromPoints(nLinePts), new THREE.LineBasicMaterial({{ color: 0xbdbdbd, linewidth: 1 }}));
-            scene.add(nBorder);
         }});
 
-        // 2. KRESLENÍ HLAVNÍ PARCELY (Zelená)
+        // 2. HLAVNÍ PARCELA
         const shape = new THREE.Shape();
         shape.moveTo(pts[0][0], -pts[0][1]);
         for(let i=1; i<pts.length; i++) {{ shape.lineTo(pts[i][0], -pts[i][1]); }}
-        const parcelGeom = new THREE.ShapeGeometry(shape);
-        const parcelMat = new THREE.MeshPhongMaterial({{ color: 0xc8e6c9, side: THREE.DoubleSide, transparent: true, opacity: 0.9 }});
-        const parcel = new THREE.Mesh(parcelGeom, parcelMat);
+        const parcel = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshPhongMaterial({{ color: 0xc8e6c9, side: THREE.DoubleSide, transparent: true, opacity: 0.9 }}));
         parcel.rotation.x = -Math.PI / 2;
+        parcel.receiveShadow = true;
         scene.add(parcel);
 
-        // Ostrá červená hranice
         const linePts = pts.map(p => new THREE.Vector3(p[0], 0.05, -p[1]));
         linePts.push(linePts[0]);
-        const border = new THREE.Line(new THREE.BufferGeometry().setFromPoints(linePts), new THREE.LineBasicMaterial({{ color: 0xd32f2f, linewidth: 3 }}));
-        scene.add(border);
+        scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(linePts), new THREE.LineBasicMaterial({{ color: 0xd32f2f, linewidth: 3 }})));
 
-        // 3. VÝPOČET STAVEBNÍ ČÁRY (Odstup)
+        // 3. MATEMATIKA PRO POŽÁRNÍ OFSETY
         function getOffsetPoints(points, distance) {{
             const result = [];
             const len = points.length;
@@ -201,15 +203,55 @@ else:
             }}
             return result;
         }}
-
-        if (offsetDist !== 0) {{
-            const offPts = getOffsetPoints(pts, offsetDist);
-            const offGeom = new THREE.BufferGeometry().setFromPoints(offPts);
-            const offLine = new THREE.LineLoop(offGeom, new THREE.LineBasicMaterial({{ color: 0xff9800, linewidth: 2 }}));
-            scene.add(offLine);
+        
+        // Zjištění orientace pro nafouknutí zóny VEN z budovy
+        function isClockwise(points) {{
+            let sum = 0;
+            for (let i = 0; i < points.length; i++) {{
+                const p1 = points[i];
+                const p2 = points[(i + 1) % points.length];
+                sum += (p2[0] - p1[0]) * (p2[1] + p1[1]);
+            }}
+            return sum > 0;
         }}
 
-        // 4. DŮM
+        // 4. BUDOVY SOUSEDŮ A JEJICH 4m/7m ZÓNY
+        bldgs.forEach(b => {{
+            const bShape = new THREE.Shape();
+            bShape.moveTo(b[0][0], -b[0][1]);
+            for(let i=1; i<b.length; i++) {{ bShape.lineTo(b[i][0], -b[i][1]); }}
+            
+            // Hmota budovy (Extrude do 3.5m)
+            const extrudeSettings = {{ depth: 3.5, bevelEnabled: false }};
+            const bGeom = new THREE.ExtrudeGeometry(bShape, extrudeSettings);
+            const bMat = new THREE.MeshPhongMaterial({{ color: 0x78909c, transparent: true, opacity: 0.85 }});
+            const bMesh = new THREE.Mesh(bGeom, bMat);
+            bMesh.rotation.x = -Math.PI / 2;
+            bMesh.position.y = 0;
+            bMesh.castShadow = true;
+            bMesh.receiveShadow = true;
+            scene.add(bMesh);
+            
+            // Požární offsety (4m a 7m)
+            const cw = isClockwise(b);
+            const sign = cw ? 1 : -1; 
+
+            // 4m zóna (oranžová / bez oken)
+            const off4 = getOffsetPoints(b, 4 * sign);
+            const off4Geom = new THREE.BufferGeometry().setFromPoints(off4);
+            const off4Line = new THREE.LineLoop(off4Geom, new THREE.LineBasicMaterial({{ color: 0xff9800, linewidth: 2 }}));
+            off4Line.position.y = 0.06;
+            scene.add(off4Line);
+
+            // 7m zóna (červená / s okny obytných místností)
+            const off7 = getOffsetPoints(b, 7 * sign);
+            const off7Geom = new THREE.BufferGeometry().setFromPoints(off7);
+            const off7Line = new THREE.LineLoop(off7Geom, new THREE.LineBasicMaterial({{ color: 0xf44336, linewidth: 2 }}));
+            off7Line.position.y = 0.06;
+            scene.add(off7Line);
+        }});
+
+        // 5. TVŮJ DŮM (Modrý blok)
         const houseGeom = new THREE.BoxGeometry(6.25, 2.7, 12.5);
         const houseMat = new THREE.MeshPhongMaterial({{ color: 0x1976d2, transparent: true, opacity: 0.9 }});
         const house = new THREE.Mesh(houseGeom, houseMat);
@@ -219,8 +261,8 @@ else:
         scene.add(house);
 
         scene.add(new THREE.GridHelper(300, 300, 0xdddddd, 0xf0f0f0));
-        scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-        const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+        const sun = new THREE.DirectionalLight(0xffffff, 0.7);
         sun.position.set(50, 100, 50);
         sun.castShadow = true;
         scene.add(sun);
