@@ -3,7 +3,7 @@ import streamlit.components.v1 as components
 import requests
 import json
 
-st.set_page_config(page_title="Matomas Live API v0.32", layout="wide")
+st.set_page_config(page_title="Matomas Live API v0.33", layout="wide")
 
 # --- FUNKCE PRO STAŽENÍ DAT Z ČÚZK ---
 def stahni_parcelu_cuzk(ku_kod, kmen, pod):
@@ -19,8 +19,7 @@ def stahni_parcelu_cuzk(ku_kod, kmen, pod):
         "where": where_clause,
         "outFields": "objectid",
         "returnGeometry": "true",
-        "outSR": "5514", # KLÍČOVÉ: Vynutí výstup v metrech (S-JTSK)
-        "f": "json"      # Esri JSON je pro metrické systémy spolehlivější
+        "f": "geojson" # Vždy nám vrátí GPS souřadnice (WGS84)
     }
     
     try:
@@ -31,9 +30,8 @@ def stahni_parcelu_cuzk(ku_kod, kmen, pod):
                 return f"ArcGIS Chyba: {data['error'].get('message', '')}"
             
             if "features" in data and len(data["features"]) > 0:
-                # Esri JSON ukládá geometrii do pole 'rings'
-                coords = data["features"][0]["geometry"]["rings"][0]
-                return coords
+                # GeoJSON polygon (stahujeme první nalezený obrys)
+                return data["features"][0]["geometry"]["coordinates"][0]
             else:
                 return "Nenalezeno."
         else:
@@ -41,26 +39,36 @@ def stahni_parcelu_cuzk(ku_kod, kmen, pod):
     except Exception as e:
         return f"Chyba sítě: {e}"
 
-# --- NORMALIZACE A VÝPOČET ROZMĚRŮ ---
-def normalizuj_sjtsk(raw_pts):
+# --- MATEMATICKÁ KONVERZE GPS -> METRY (Lokální projekce ČR) ---
+def wgs84_do_metru(raw_pts):
     if not raw_pts: return [], 0, 0
-    xs = [p[0] for p in raw_pts]
-    ys = [p[1] for p in raw_pts]
     
-    cx = min(xs) + (max(xs) - min(xs)) / 2
-    cy = min(ys) + (max(ys) - min(ys)) / 2
+    # Najdeme střed v GPS stupních
+    lons = [p[0] for p in raw_pts]
+    lats = [p[1] for p in raw_pts]
+    cx = min(lons) + (max(lons) - min(lons)) / 2
+    cy = min(lats) + (max(lats) - min(lats)) / 2
     
-    sirka = max(xs) - min(xs)
-    delka = max(ys) - min(ys)
+    norm_pts = []
+    for p in raw_pts:
+        # Převod rozdílu ve stupních na metry (konstanty pro rovnoběžku 50°)
+        x_metry = (p[0] - cx) * 71500   # 1° délky = cca 71 500 m
+        y_metry = (p[1] - cy) * 111320  # 1° šířky = cca 111 320 m
+        norm_pts.append([round(x_metry, 3), round(y_metry, 3)])
+        
+    # Výpočet rozměrů
+    m_xs = [p[0] for p in norm_pts]
+    m_ys = [p[1] for p in norm_pts]
+    sirka = max(m_xs) - min(m_xs)
+    delka = max(m_ys) - min(m_ys)
     
-    norm_pts = [[round(p[0] - cx, 3), round(p[1] - cy, 3)] for p in raw_pts]
     return norm_pts, sirka, delka
 
 # --- UI a SIDEBAR ---
 with st.sidebar:
     st.title("📡 Živé napojení ČÚZK")
     
-    ku_kod = st.text_input("Kód KÚ (např. 768031)", value="768031")
+    ku_kod = st.text_input("Kód KÚ (např. 768031 pro Nučničky)", value="768031")
     col1, col2 = st.columns(2)
     with col1:
         kmen = st.text_input("Kmenové č.", value="45")
@@ -68,27 +76,28 @@ with st.sidebar:
         pod = st.text_input("Pododdělení", value="104")
         
     if st.button("Stáhnout parcelu", type="primary"):
-        with st.spinner("Stahuji a přepočítávám na metry..."):
+        with st.spinner("Stahuji a modeluji..."):
             vysledek = stahni_parcelu_cuzk(ku_kod, kmen, pod)
             if isinstance(vysledek, list):
                 st.session_state['api_data'] = vysledek
-                st.success("Bingo! Data stažena v metrech.")
+                st.success("Data stažena a převedena do metrů!")
             else:
                 st.error(f"Chyba: {vysledek}")
 
     st.write("---")
-    st.subheader("🛠️ Diagnostika")
+    st.subheader("🛠️ Diagnostika a rozměry")
     raw_data = st.session_state.get('api_data', [])
     
     if raw_data:
-        display_pts, sirka, delka = normalizuj_sjtsk(raw_data)
+        display_pts, sirka, delka = wgs84_do_metru(raw_data)
         st.metric("Počet lomových bodů", len(display_pts))
+        # Nyní už tu nebudou nuly, ale skutečné metry!
         st.write(f"**Reálné rozměry:** {sirka:.1f} m × {delka:.1f} m")
     else:
         display_pts = []
 
 # --- 3D ENGINE ---
-st.title("📐 Digitální dvojče z RÚIAN (v0.32)")
+st.title("📐 Skutečné 3D dvojče z katastru (v0.33)")
 
 if not display_pts:
     st.info("Klikni na 'Stáhnout parcelu'.")
@@ -109,10 +118,10 @@ else:
 
         // KRESLENÍ POLYGONU
         const shape = new THREE.Shape();
-        // S-JTSK korekce: Pro správnou orientaci vůči severu převracíme osy
-        shape.moveTo(-pts[0][0], -pts[0][1]);
+        // GPS data mají orientaci X=Východ, Y=Sever. V Three.js je Sever = -Z.
+        shape.moveTo(pts[0][0], -pts[0][1]);
         for(let i=1; i<pts.length; i++) {{
-            shape.lineTo(-pts[i][0], -pts[i][1]);
+            shape.lineTo(pts[i][0], -pts[i][1]);
         }}
         
         const parcelGeom = new THREE.ShapeGeometry(shape);
@@ -122,12 +131,12 @@ else:
         scene.add(parcel);
 
         // KRESLENÍ HRANICE
-        const linePts = pts.map(p => new THREE.Vector3(-p[0], 0.1, -p[1]));
+        const linePts = pts.map(p => new THREE.Vector3(p[0], 0.1, -p[1]));
         const borderGeom = new THREE.BufferGeometry().setFromPoints(linePts);
         const border = new THREE.Line(borderGeom, new THREE.LineBasicMaterial({{ color: 0xd32f2f, linewidth: 3 }}));
         scene.add(border);
 
-        // DŮM - Zlatý standard (Modrý)
+        // DŮM - Zlatý standard 12.5 x 6.25m
         const house = new THREE.Mesh(
             new THREE.BoxGeometry(6.25, 2.7, 12.5),
             new THREE.MeshPhongMaterial({{ color: 0x1976d2, transparent: true, opacity: 0.9 }})
