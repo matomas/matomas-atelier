@@ -1,110 +1,64 @@
 import streamlit as st
+import matplotlib.pyplot as plt
 import ezdxf
 import io
-import matplotlib.pyplot as plt
 
-# --- KONFIGURACE KONSTRUKCÍ ---
-STAVEBNI_SYSTEMY = {
-    "Zlatý Standard (Monolit)": {
-        "zed_tloustka": 0.250, 
-        "zatepleni": 0.180, 
-        "cena_m2": 55000,
-        "popis": "Betonové tvarovky, armování, monolitický strop. Maximální tuhost."
-    },
-    "Cihla (Jednovrstvá)": {
-        "zed_tloustka": 0.440, 
-        "zatepleni": 0.0, 
-        "cena_m2": 58000,
-        "popis": "Broušená cihla bez zateplení. Klasická cesta."
-    },
-    "Dřevostavba (2by4)": {
-        "zed_tloustka": 0.140, 
-        "zatepleni": 0.200, 
-        "cena_m2": 48000,
-        "popis": "Lehký dřevěný skelet. Rychlá stavba, nízká akumulace."
-    }
-}
+# --- KONFIGURACE ---
+RASTR = 0.625
 
-def vypocitej_projekt(sirka, delka, system_name):
-    sys = STAVEBNI_SYSTEMY[system_name]
-    plocha = sirka * delka
-    obvod = 2 * (sirka + delka)
-    
-    # Výpočet ceny na základě plochy a zvoleného systému
-    cena_zakladni = plocha * sys["cena_m2"]
-    
-    # Technické detaily (zjednodušeně pro demo)
-    beton_m3 = (plocha * 0.15) + (obvod * 0.4 * 0.2)
-    ocel_kg = (plocha * 7.9 * 1.3)
-    
-    return {
-        "Cena celkem": f"{round(cena_zakladni):,} Kč",
-        "Beton (m3)": round(beton_m3, 1),
-        "Ocel (kg)": round(ocel_kg),
-        "Vnější rozměr": f"{sirka + 2*sys['zatepleni']:.2f} x {delka + 2*sys['zatepleni']:.2f} m"
-    }
+def vypocitej_rozmer(moduly):
+    return round(moduly * RASTR, 3)
 
-# --- WEBOWÉ ROZHRANÍ ---
-st.set_page_config(page_title="Matomas AI Ateliér", layout="wide")
-
-st.title("🏗️ Matomas AI Ateliér - verze 0.2")
+# --- WEB ---
+st.set_page_config(page_title="Matomas AI Ateliér v0.3", layout="wide")
+st.title("🏠 Matomas AI Ateliér - Zónování prostoru")
 
 with st.sidebar:
-    st.header("1. Parametry domu")
-    mod_x = st.slider("Délka (modul 625mm)", 10, 32, 20)
-    mod_y = st.slider("Šířka (modul 625mm)", 8, 16, 10)
+    st.header("1. Rozměry obálky")
+    mod_x = st.slider("Délka (moduly 625mm)", 10, 32, 24)
+    mod_y = st.slider("Šířka (moduly 625mm)", 8, 16, 12)
     
-    sirka = mod_y * 0.625
-    delka = mod_x * 0.625
+    sirka = vypocitej_rozmer(mod_y)
+    delka = vypocitej_rozmer(mod_x)
     
-    st.header("2. Konstrukce")
-    system_choice = st.selectbox("Vyberte systém", list(STAVEBNI_SYSTEMY.keys()))
-    st.caption(STAVEBNI_SYSTEMY[system_choice]["popis"])
+    st.header("2. Dispozice")
+    pomer_denni = st.slider("Velikost denní zóny (%)", 30, 70, 50) / 100
 
-# Data a výpočty
-vysledky = vypocitej_projekt(sirka, delka, system_choice)
+# VÝPOČET PŘÍČKY
+# Příčka musí sedět na rastru
+delka_denni_raw = delka * pomer_denni
+moduly_denni = round(delka_denni_raw / RASTR)
+delka_denni = moduly_denni * RASTR
 
-# --- VIZUALIZACE PŮDORYSU ---
-col1, col2 = st.columns([1, 1])
+# GRAF
+fig, ax = plt.subplots(figsize=(12, 7))
 
-with col1:
-    st.subheader("Náhled půdorysu (Hrubá stavba)")
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Vnější obrys
-    rect = plt.Rectangle((0, 0), sirka, delka, linewidth=3, edgecolor='black', facecolor='none')
-    ax.add_patch(rect)
-    
-    # Rastr 625mm (jemné linky)
-    for x in [i * 0.625 for i in range(int(sirka/0.625) + 1)]:
-        ax.axvline(x, color='gray', lw=0.5, ls='--')
-    for y in [i * 0.625 for i in range(int(delka/0.625) + 1)]:
-        ax.axhline(y, color='gray', lw=0.5, ls='--')
-        
-    ax.set_xlim(-1, sirka + 1)
-    ax.set_ylim(-1, delka + 1)
-    ax.set_aspect('equal')
-    ax.set_title(f"Hrubý rozměr: {sirka} x {delka} m")
-    st.pyplot(fig)
+# Obvod (Hrubá stavba)
+rect = plt.Rectangle((0, 0), sirka, delka, linewidth=3, edgecolor='black', facecolor='#f0f0f0', label="Hrubá stavba")
+ax.add_patch(rect)
 
-with col2:
-    st.subheader("Ekonomika a technika")
-    c1, c2 = st.columns(2)
-    c1.metric("Odhadovaná cena", vysledky["Cena celkem"])
-    c2.metric("Vnější rozměr s fasádou", vysledky["Vnější rozměr"])
-    
-    st.write("---")
-    st.write(f"**Materiálový odhad pro {system_choice}:**")
-    st.write(f"- Beton: {vysledky['Beton (m3)']} m3")
-    st.write(f"- Ocel: {vysledky['Ocel (kg)']} kg")
+# Dělící příčka (Zlatý standard - nosná/akustická)
+ax.plot([0, sirka], [delka_denni, delka_denni], color='red', lw=4, label="Hlavní dělící příčka")
 
-# --- DXF EXPORT ---
-if st.button("💾 Exportovat DXF studii"):
-    doc = ezdxf.new('R2010')
-    msp = doc.modelspace()
-    s_mm, d_mm = sirka * 1000, delka * 1000
-    msp.add_lwpolyline([(0, 0), (s_mm, 0), (s_mm, d_mm), (0, d_mm), (0, 0)], dxfattribs={'color': 7})
-    
-    out = io.StringIO()
-    doc.write(out)
-    st.download_button("Klikněte pro stažení DXF", data=out.getvalue(), file_name="studie.dxf")
+# Popisky zón
+ax.text(sirka/2, delka_denni/2, "DENNÍ ZÓNA\n(Obývací pokoj + KK)", ha='center', va='center', fontweight='bold')
+ax.text(sirka/2, (delka + delka_denni)/2, "NOČNÍ ZÓNA\n(Ložnice + Koupelna)", ha='center', va='center', fontweight='bold')
+
+# Rastr
+for x in [i * RASTR for i in range(mod_y + 1)]:
+    ax.axvline(x, color='white', lw=0.8, ls='-')
+for y in [i * RASTR for i in range(mod_x + 1)]:
+    ax.axhline(y, color='white', lw=0.8, ls='-')
+
+ax.set_xlim(-0.5, sirka + 0.5)
+ax.set_ylim(-0.5, delka + 0.5)
+ax.set_aspect('equal')
+plt.legend(loc='upper right')
+st.pyplot(fig)
+
+# STATISTIKA
+st.subheader("Parametry zón")
+c1, c2, c3 = st.columns(3)
+c1.metric("Plocha denní zóny", f"{round(sirka * delka_denni, 2)} m²")
+c2.metric("Plocha noční zóny", f"{round(sirka * (delka - delka_denni), 2)} m²")
+c3.metric("Celková užitná plocha", f"{round(sirka * delka, 2)} m²")
