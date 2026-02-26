@@ -4,7 +4,7 @@ import requests
 import json
 import numpy as np
 
-st.set_page_config(page_title="Matomas Urban Master v0.55", layout="wide")
+st.set_page_config(page_title="Matomas Urban Master v0.56", layout="wide")
 
 API_KEY_TOPO = "27b312106a0008e8d9879f1800bc2e6b"
 
@@ -27,7 +27,7 @@ def get_terrain(lat, lon):
 
 # --- UI SIDEBAR ---
 with st.sidebar:
-    st.title("🏙️ Urbanistický Kontext v0.55")
+    st.title("🏙️ Urbanistický Kontext v0.56")
     ku = st.text_input("KÚ", "768031")
     km = st.text_input("Kmen", "45")
     pd = st.text_input("Pod", "124")
@@ -39,12 +39,10 @@ with st.sidebar:
             f_p = stahni_cuzk(url_p, {"where":where, "outSR":"5514", "f":"json", "returnGeometry":"true", "outFields":"objectid"})
             
             if f_p:
-                # Hlavní parcela
                 main_raw = f_p[0]["geometry"]["rings"][0]
                 cx, cy = sum(p[0] for p in main_raw)/len(main_raw), sum(p[1] for p in main_raw)/len(main_raw)
                 st.session_state['main'] = [[round(-p[0]+cx, 3), round(-p[1]+cy, 3)] for p in main_raw]
                 
-                # Okolí (Sousedé + Budovy)
                 bbox = f"{cx-120},{cy-120},{cx+120},{cy+120}"
                 
                 # Sousedé
@@ -52,12 +50,9 @@ with st.sidebar:
                 st.session_state['neighs'] = []
                 for n in neighs:
                     n_raw = n["geometry"]["rings"][0]
-                    if n_raw != main_raw: # Striktní oddělení hlavní parcely
+                    if n_raw != main_raw:
                         n_local = [[round(-p[0]+cx, 3), round(-p[1]+cy, 3)] for p in n_raw]
-                        st.session_state['neighs'].append({
-                            "pts": n_local, 
-                            "road": n["attributes"].get("druhpozemkukod")==14
-                        })
+                        st.session_state['neighs'].append({"pts": n_local, "road": n["attributes"].get("druhpozemkukod")==14})
                 
                 # Budovy
                 url_b = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/3/query"
@@ -73,7 +68,7 @@ with st.sidebar:
                     zs = np.array(topo["height"])
                     st.session_state['topo'] = {"z": (zs - np.min(zs)).tolist(), "dim": int(np.sqrt(len(zs)))}
                 
-                st.success("Čistý model načten!")
+                st.success("Čistý model s přerušovanými zónami načten!")
 
     st.write("---")
     vyska = st.slider("Výška 1.NP (m)", -5.0, 5.0, 0.0)
@@ -105,8 +100,8 @@ if 'main' in st.session_state:
             return sum > 0;
         }}
 
-        // BEZPEČNÝ OFFSET (s ořezem ostrých rohů)
-        function getSafeOffset(pts, dist) {{
+        // BEZPEČNÝ OFFSET (Uříznutí špičáků)
+        function getSafeOffset(pts, dist, zLevel) {{
             const res = [];
             for (let i=0; i<pts.length; i++) {{
                 const p1 = pts[(i+pts.length-1)%pts.length], p2 = pts[i], p3 = pts[(i+1)%pts.length];
@@ -116,16 +111,22 @@ if 'main' in st.session_state:
                 const n1 = {{x:-v1.y/m1, y:v1.x/m1}}, n2 = {{x:-v2.y/m2, y:v2.x/m2}};
                 const bx = n1.x+n2.x, by = n1.y+n2.y, bm = Math.sqrt(bx**2+by**2);
                 
-                let scale = dist;
-                if(bm > 0.001) {{
-                    scale = dist / ((n1.x*bx + n1.y*by)/bm);
-                    // Zastřižení šílených "špičáků" (miter limit)
-                    if(Math.abs(scale) > Math.abs(dist) * 3) scale = dist * 3 * Math.sign(scale);
+                if (bm < 0.001) {{
+                    res.push(new THREE.Vector3(p2[0]+n1.x*dist, zLevel, -(p2[1]+n1.y*dist)));
+                    continue;
                 }}
                 
-                res.push(new THREE.Vector3(p2[0]+(bx/bm)*scale, 0.25, -(p2[1]+(by/bm)*scale)));
+                let dot = (n1.x*bx + n1.y*by)/bm;
+                let miter = 1 / dot;
+                
+                // MITER CLAMP (Uřízne špičák, když je úhel moc ostrý)
+                if (miter > 2.0) miter = 2.0;
+                if (miter < -2.0) miter = -2.0;
+                
+                const scale = dist * miter;
+                res.push(new THREE.Vector3(p2[0]+(bx/bm)*scale, zLevel, -(p2[1]+(by/bm)*scale)));
             }}
-            if(res.length > 0) res.push(res[0]);
+            if(res.length > 0) res.push(res[0].clone());
             return res;
         }}
 
@@ -142,23 +143,18 @@ if 'main' in st.session_state:
             base.rotation.x = -Math.PI/2; base.position.y = -0.6; s.add(base);
         }}
 
-        // 2. OKOLNÍ PARCELY (Šedé)
-        const neighs = {json.dumps(st.session_state['neighs'])};
+        // 2. OKOLNÍ PARCELY
+        const neighs = {json.dumps(st.session_state.get('neighs', []))};
         neighs.forEach(n => {{
             const shp = new THREE.Shape(); shp.moveTo(n.pts[0][0], n.pts[0][1]);
             n.pts.forEach(p => shp.lineTo(p[0], p[1]));
-            
-            const m = new THREE.Mesh(new THREE.ShapeGeometry(shp), new THREE.MeshBasicMaterial({{
-                color: n.road ? 0xdddddd : 0xf0f0f0, side: 2, transparent: true, opacity: 0.8
-            }}));
+            const m = new THREE.Mesh(new THREE.ShapeGeometry(shp), new THREE.MeshBasicMaterial({{color: n.road ? 0xdddddd : 0xf0f0f0, side: 2, transparent: true, opacity: 0.8}}));
             m.rotation.x = -Math.PI/2; m.position.y = 0.00; s.add(m);
-
-            // Tenké šedé hranice sousedů
             const lPts = n.pts.map(p => new THREE.Vector3(p[0], 0.02, -p[1])); lPts.push(lPts[0]);
             s.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(lPts), new THREE.LineBasicMaterial({{color: 0xbbbbbb, linewidth: 1}})));
         }});
 
-        // 3. HLAVNÍ PARCELA (Zelená + Červená hrana)
+        // 3. HLAVNÍ PARCELA
         const mainPts = {json.dumps(st.session_state['main'])};
         const mShp = new THREE.Shape(); mShp.moveTo(mainPts[0][0], mainPts[0][1]);
         mainPts.forEach(p => mShp.lineTo(p[0], p[1]));
@@ -168,26 +164,39 @@ if 'main' in st.session_state:
         const mlPts = mainPts.map(p => new THREE.Vector3(p[0], 0.1, -p[1])); mlPts.push(mlPts[0]);
         s.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(mlPts), new THREE.LineBasicMaterial({{color: 0xd32f2f, linewidth: 3}})));
 
-        // Odstup 2m pro tvůj dům
+        // Odstup 2m pro tvůj dům (Pevná plná čára)
         const signMain = isClockwise(mainPts) ? -1 : 1; 
-        const offMain = getSafeOffset(mainPts, 2.0 * signMain);
+        const offMain = getSafeOffset(mainPts, 2.0 * signMain, 0.12);
         if(offMain.length > 0) s.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(offMain), new THREE.LineBasicMaterial({{color: 0xff9800, linewidth: 2}})));
 
-        // 4. BUDOVY A POŽÁRNÍ ZÓNY
-        const bldgs = {json.dumps(st.session_state['bldgs'])};
+        // 4. BUDOVY A DASHED ZÓNY
+        const bldgs = {json.dumps(st.session_state.get('bldgs', []))};
         bldgs.forEach(b => {{
             const bShp = new THREE.Shape(); bShp.moveTo(b[0][0], b[0][1]);
             b.forEach(p => bShp.lineTo(p[0], p[1]));
             const bm = new THREE.Mesh(new THREE.ExtrudeGeometry(bShp, {{depth:4, bevelEnabled:false}}), new THREE.MeshPhongMaterial({{color:0x78909c, transparent:true, opacity:0.8}}));
             bm.rotation.x = -Math.PI/2; bm.position.y = 0.05; s.add(bm);
 
-            // Požární zóny (Červená 7m)
             const signB = isClockwise(b) ? 1 : -1;
-            const f7 = getSafeOffset(b, 7.0 * signB);
-            if(f7.length > 0) s.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(f7), new THREE.LineBasicMaterial({{color: 0xf44336, opacity: 0.6, transparent: true}})));
+            
+            // 4m zóna (Oranžová přerušovaná)
+            const f4 = getSafeOffset(b, 4.0 * signB, 0.25);
+            if(f4.length > 0) {{
+                const g4 = new THREE.BufferGeometry().setFromPoints(f4);
+                g4.computeLineDistances(); // Nutné pro přerušovanou čáru
+                s.add(new THREE.Line(g4, new THREE.LineDashedMaterial({{color: 0xff9800, dashSize: 0.8, gapSize: 0.6, linewidth: 2}})));
+            }}
+
+            // 7m zóna (Červená přerušovaná)
+            const f7 = getSafeOffset(b, 7.0 * signB, 0.26);
+            if(f7.length > 0) {{
+                const g7 = new THREE.BufferGeometry().setFromPoints(f7);
+                g7.computeLineDistances(); // Nutné pro přerušovanou čáru
+                s.add(new THREE.Line(g7, new THREE.LineDashedMaterial({{color: 0xf44336, dashSize: 0.8, gapSize: 0.6, linewidth: 2}})));
+            }}
         }});
 
-        // 5. TVŮJ DŮM (Modrý)
+        // 5. TVŮJ DŮM
         const h = new THREE.Mesh(new THREE.BoxGeometry(6.25, 4, 12.5), new THREE.MeshPhongMaterial({{color:0x1976d2}}));
         h.position.set({pos_x}, {vyska+2.1}, {-pos_z}); h.rotation.y = {rot}*Math.PI/180; s.add(h);
 
