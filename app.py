@@ -1,24 +1,28 @@
 import streamlit as st
 import streamlit.components.v1 as components
+import numpy as np # Teď už ho budeme potřebovat pro práci s maticí výšek
 
-# --- KONFIGURACE ---
-RASTR = 0.625
-VYSKA_NP = 2.7
+st.set_page_config(page_title="Matomas Terrain Pro", layout="wide")
 
-st.set_page_config(page_title="Matomas Terrain Engine", layout="wide")
+# SIMULACE IMPORTU Z ČÚZK (DMR 5G)
+# V reálu tohle pole naplníme daty z API volání
+def generate_real_terrain(size):
+    # Simulujeme reálný kopec s proláklinou
+    x = np.linspace(0, 5, size)
+    y = np.linspace(0, 5, size)
+    X, Y = np.meshgrid(x, y)
+    Z = np.sin(X) * np.cos(Y) * 3  # Tady budou reálná data z výškopisu
+    return Z.flatten().tolist()
 
 with st.sidebar:
-    st.title("⛰️ Morfologie terénu")
-    st.write("Nastavte převýšení rohů pozemku (m)")
-    z_vlevo_dole = st.slider("Levý dolní roh", -5.0, 5.0, 0.0)
-    z_vpravo_dole = st.slider("Pravý dolní roh", -5.0, 5.0, 1.5)
-    z_vpravo_nahore = st.slider("Pravý horní roh", -5.0, 5.0, 3.0)
-    z_vlevo_nahore = st.slider("Levý horní roh", -5.0, 5.0, 1.0)
-    
-    st.write("---")
-    st.subheader("Osazení domu")
-    vyska_osazeni = st.slider("Výškové osazení domu (Z)", -2.0, 5.0, 1.0)
-    rotace = st.slider("Rotace (°)", 0, 360, 45)
+    st.title("🏗️ Technická morfologie")
+    st.write("Data z digitálního modelu reliéfu (DMR)")
+    sklon = st.slider("Celkový sklon svahu (%)", 0, 30, 10)
+    vyska_osazeni = st.slider("Osazení 1.NP (m.n.m.)", 350.0, 450.0, 410.0)
+
+# Příprava dat pro JS
+size = 21 # mřížka 21x21 bodů
+terrain_data = generate_real_terrain(size)
 
 three_js_code = f"""
 <div id="container" style="width: 100%; height: 650px; background: #f0f2f6; border-radius: 15px;"></div>
@@ -26,53 +30,46 @@ three_js_code = f"""
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf0f2f6);
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth / 650, 0.1, 1000);
     const renderer = new THREE.WebGLRenderer({{ antialias: true }});
     renderer.setSize(window.innerWidth, 650);
     renderer.shadowMap.enabled = true;
     document.getElementById('container').appendChild(renderer.domElement);
 
-    // 1. TERÉN S MORFOLOGIÍ
-    // Vytvoříme mřížku 2x2 segmenty (pro 4 rohy)
-    const terrainGeom = new THREE.PlaneGeometry(30, 40, 1, 1);
-    const vertices = terrainGeom.attributes.position.array;
+    // TERÉN Z MATICE (DMR simulace)
+    const geometry = new THREE.PlaneGeometry(40, 40, {size-1}, {size-1});
+    const vertices = geometry.attributes.position.array;
+    const heights = {terrain_data};
 
-    // Přepsání Z souřadnic (v Three.js Plane je to index 2, 5, 8, 11...)
-    // Indexy vertexů: 0: vlevo nahoře, 1: vpravo nahoře, 2: vlevo dole, 3: vpravo dole
-    vertices[2] = {z_vlevo_nahore};
-    vertices[5] = {z_vpravo_nahore};
-    vertices[8] = {z_vlevo_dole};
-    vertices[11] = {z_vpravo_dole};
-    
-    terrainGeom.computeVertexNormals(); // Pro správné stínování svahu
+    for (let i = 0; i < heights.length; i++) {{
+        // Každému bodu mřížky přiřadíme výšku z importu + sklon svahu
+        const slopeOffset = (i / {size}) * ({sklon} / 10);
+        vertices[i * 3 + 2] = heights[i] + slopeOffset;
+    }}
+    geometry.computeVertexNormals();
 
-    const terrainMat = new THREE.MeshPhongMaterial({{ color: 0x9edb9e, side: THREE.DoubleSide, wireframe: false }});
-    const terrain = new THREE.Mesh(terrainGeom, terrainMat);
+    const material = new THREE.MeshPhongMaterial({{ color: 0x91cf91, wireframe: true }});
+    const terrain = new THREE.Mesh(geometry, material);
     terrain.rotation.x = -Math.PI / 2;
     terrain.receiveShadow = true;
     scene.add(terrain);
 
-    // 2. DŮM (Tvůj 6m trakt)
-    const houseGeom = new THREE.BoxGeometry(6.25, {VYSKA_NP}, 12.5);
-    const houseMat = new THREE.MeshPhongMaterial({{ color: 0x3498db, transparent: true, opacity: 0.9 }});
+    // DŮM - 0.000 (Zlatý Standard)
+    const houseGeom = new THREE.BoxGeometry(6.25, 2.7, 12.5);
+    const houseMat = new THREE.MeshPhongMaterial({{ color: 0x3498db }});
     const house = new THREE.Mesh(houseGeom, houseMat);
-    house.position.set(5, {vyska_osazeni} + ({VYSKA_NP}/2), -15);
-    house.rotation.y = ({rotace} * Math.PI) / 180;
+    // Výškově dům sedí na uživatelské kótě (relativně k terénu)
+    house.position.set(0, 1.35 + ({vyska_osazeni} - 410), 0);
     house.castShadow = true;
     scene.add(house);
 
-    // Pomocný Grid (ukazuje absolutní nulu)
-    const grid = new THREE.GridHelper(50, 50, 0xaaaaaa, 0xcccccc);
-    scene.add(grid);
-
-    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
     const sun = new THREE.DirectionalLight(0xffffff, 0.8);
-    sun.position.set(10, 20, 10);
+    sun.position.set(20, 50, 20);
     sun.castShadow = true;
     scene.add(sun);
 
-    camera.position.set(30, 30, 30);
+    camera.position.set(40, 40, 40);
     new THREE.OrbitControls(camera, renderer.domElement);
 
     function animate() {{ requestAnimationFrame(animate); renderer.render(scene, camera); }}
