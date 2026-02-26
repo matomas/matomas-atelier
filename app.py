@@ -3,74 +3,74 @@ import streamlit.components.v1 as components
 import requests
 import json
 
-st.set_page_config(page_title="Matomas Site Intelligence v0.38", layout="wide")
+st.set_page_config(page_title="Matomas Site Intelligence v0.39", layout="wide")
 
-# --- 1. STAŽENÍ HLAVNÍ PARCELY (Nativně v metrech S-JTSK) ---
+# --- 1. STAŽENÍ HLAVNÍ PARCELY (S-JTSK) ---
 def stahni_parcelu_cuzk_sjtsk(ku_kod, kmen, pod):
     url = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/5/query"
     where_clause = f"katastralniuzemi={ku_kod} AND kmenovecislo={kmen}"
     if pod and pod.strip() != "": where_clause += f" AND poddelenicisla={pod}"
     else: where_clause += " AND poddelenicisla IS NULL"
     
-    params = {
-        "where": where_clause, 
-        "outFields": "objectid", 
-        "returnGeometry": "true", 
-        "outSR": "5514", # Vynutí S-JTSK metry
-        "f": "json"      # ESRI JSON (přesnější pro S-JTSK)
-    }
+    params = {"where": where_clause, "outFields": "objectid", "returnGeometry": "true", "outSR": "5514", "f": "json"}
     try:
         res = requests.get(url, params=params, timeout=15)
         if res.status_code == 200:
             data = res.json()
             if "features" in data and len(data["features"]) > 0:
-                # ESRI JSON ukládá souřadnice do 'rings'
                 return data["features"][0]["geometry"]["rings"][0]
     except: pass
     return None
 
-# --- 2. STAŽENÍ OKOLÍ (Nativně v metrech S-JTSK) ---
+# --- 2. STAŽENÍ OKOLÍ (S-JTSK) ---
 def stahni_okoli_sjtsk(cx_orig, cy_orig, layer_id, out_fields="objectid"):
-    # Hledáme v okruhu 50 metrů od středu parcely
     xmin, xmax = cx_orig - 50, cx_orig + 50
     ymin, ymax = cy_orig - 50, cy_orig + 50
     url = f"https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/{layer_id}/query"
-    params = {
-        "geometry": f"{xmin},{ymin},{xmax},{ymax}",
-        "geometryType": "esriGeometryEnvelope",
-        "inSR": "5514",
-        "spatialRel": "esriSpatialRelIntersects",
-        "outFields": out_fields,
-        "returnGeometry": "true",
-        "outSR": "5514",
-        "f": "json"
-    }
+    params = {"geometry": f"{xmin},{ymin},{xmax},{ymax}", "geometryType": "esriGeometryEnvelope", "inSR": "5514", "spatialRel": "esriSpatialRelIntersects", "outFields": out_fields, "returnGeometry": "true", "outSR": "5514", "f": "json"}
     try:
         res = requests.get(url, params=params, timeout=15)
-        if res.status_code == 200:
-            return res.json().get("features", [])
+        if res.status_code == 200: return res.json().get("features", [])
     except: pass
     return []
 
-# --- 3. NORMALIZACE A ORIENTACE (Sever nahoru) ---
+# --- 3. STAŽENÍ VÝŠKOPISU DMR 5G ---
+def stahni_dmr5g(pts_sjtsk):
+    # Volání služby DMR 5G přes ArcGIS REST API
+    url = "https://ags.cuzk.cz/arcgis/rest/services/3D/dmr5g/ImageServer/getSamples"
+    geom = {"points": pts_sjtsk, "spatialReference": {"wkid": 5514}}
+    data = {"geometry": json.dumps(geom), "geometryType": "esriGeometryMultipoint", "returnFirstValueOnly": "true", "f": "json"}
+    try:
+        res = requests.post(url, data=data, timeout=15)
+        if res.status_code == 200:
+            rj = res.json()
+            if "samples" in rj:
+                vals = []
+                for s in rj["samples"]:
+                    v = s.get("value", "NoData")
+                    if v != "NoData":
+                        try: vals.append(float(v))
+                        except: vals.append(None)
+                    else: vals.append(None)
+                return vals
+    except: pass
+    return None
+
+# --- 4. NORMALIZACE S-JTSK ---
 def center_sjtsk(raw_pts, cx=None, cy=None):
     if not raw_pts: return [], cx, cy
-    # S-JTSK má osy orientované na Jih a Západ (záporné hodnoty).
-    # Překlopíme to na standardní kartézský systém (X=Východ, Y=Sever)
     cartesian = [[-p[0], -p[1]] for p in raw_pts]
-    
     if cx is None or cy is None:
         xs = [p[0] for p in cartesian]
         ys = [p[1] for p in cartesian]
         cx = min(xs) + (max(xs) - min(xs)) / 2
         cy = min(ys) + (max(ys) - min(ys)) / 2
-        
     norm_pts = [[round(p[0] - cx, 3), round(p[1] - cy, 3)] for p in cartesian]
     return norm_pts, cx, cy
 
 # --- UI SIDEBAR ---
 with st.sidebar:
-    st.title("🔥 Komplexní Analýza Zástavby")
+    st.title("🔥 Morfologie a Zástavba")
     
     ku_kod = st.text_input("Kód KÚ", value="768031")
     col1, col2 = st.columns(2)
@@ -80,20 +80,19 @@ with st.sidebar:
     st.write("---")
     nacteni_okoli = st.checkbox("Detekovat cesty a parcely", value=True)
     nacteni_budov = st.checkbox("Detekovat domy (Požární zóny)", value=True)
+    nacteni_teren = st.checkbox("Načíst 3D terén (DMR 5G)", value=True)
         
     if st.button("Stáhnout a Analyzovat", type="primary"):
-        with st.spinner("Stahuji absolutně přesná data (S-JTSK)..."):
+        with st.spinner("Stahuji data, budovy a skenuji terén..."):
             raw_main = stahni_parcelu_cuzk_sjtsk(ku_kod, kmen, pod)
             if raw_main:
-                # 1. Hlavní parcela
                 main_met, cx, cy = center_sjtsk(raw_main)
                 st.session_state['main_pts'] = main_met
                 
-                # Z původních souřadnic získáme originální střed pro stahování okolí
                 orig_cx = sum(p[0] for p in raw_main) / len(raw_main)
                 orig_cy = sum(p[1] for p in raw_main) / len(raw_main)
                 
-                # 2. Sousední parcely (Vrstva 5)
+                # Okolí
                 neighbors_data = []
                 if nacteni_okoli:
                     okoli_features = stahni_okoli_sjtsk(orig_cx, orig_cy, 5, "druhpozemkukod")
@@ -107,36 +106,68 @@ with st.sidebar:
                             neighbors_data.append({"polygon": n_met, "is_road": is_road})
                 st.session_state['neighbors'] = neighbors_data
 
-                # 3. Okolní budovy (Vrstva 3)
+                # Budovy
                 budovy_data = []
                 if nacteni_budov:
                     budovy_features = stahni_okoli_sjtsk(orig_cx, orig_cy, 3)
                     for feat in budovy_features:
                         geom = feat.get("geometry", {})
                         if geom and "rings" in geom and len(geom["rings"]) > 0:
-                            # Stáhneme všechny bloky (rings) dané budovy
                             for ring in geom["rings"]:
                                 b_met, _, _ = center_sjtsk(ring, cx, cy)
                                 budovy_data.append(b_met)
                 st.session_state['budovy'] = budovy_data
                 
-                st.success("Přesný ortogonální kontext načten!")
+                # DMR 5G Terén
+                if nacteni_teren:
+                    grid_size = 21
+                    W_terrain, H_terrain = 100, 100
+                    xmin_t, xmax_t = -50, 50
+                    ymin_t, ymax_t = -50, 50
+                    
+                    raw_sjtsk_points = []
+                    for j in range(grid_size):
+                        ly = ymax_t - j * (H_terrain / (grid_size - 1))
+                        for i in range(grid_size):
+                            lx = xmin_t + i * (W_terrain / (grid_size - 1))
+                            raw_sjtsk_points.append([-(lx + cx), -(ly + cy)])
+                            
+                    heights = stahni_dmr5g(raw_sjtsk_points)
+                    if heights and len(heights) == grid_size * grid_size:
+                        valid_h = [h for h in heights if h is not None]
+                        if valid_h:
+                            center_idx = (grid_size // 2) * grid_size + (grid_size // 2)
+                            Z_nula = heights[center_idx] if heights[center_idx] is not None else sum(valid_h)/len(valid_h)
+                            normalized_heights = [round(h - Z_nula, 3) if h is not None else 0.0 for h in heights]
+                            st.session_state['terrain'] = {
+                                "w": W_terrain, "h": H_terrain, "z_nula": Z_nula, "heights": normalized_heights
+                            }
+                        else: st.session_state['terrain'] = None
+                    else: st.session_state['terrain'] = None
+                else:
+                    st.session_state['terrain'] = None
+                
+                st.success("Komplexní model načten!")
             else:
                 st.error("Chyba: Parcelu se nepodařilo stáhnout.")
 
     st.write("---")
     st.subheader("📐 Osazení tvého domu")
-    st.info("Odstup od hranice parcely je zafixován na vnitřní +2.0 m.")
+    vyska = st.slider("Výškové osazení 1.NP (m)", -5.0, 5.0, 0.0, step=0.1)
     pos_x = st.slider("Posun domu X", -30.0, 30.0, 0.0)
     pos_z = st.slider("Posun domu Z", -30.0, 30.0, 0.0)
     rotace = st.slider("Natočení domu (°)", 0, 360, 0)
+    
+    if st.session_state.get('terrain'):
+        st.info(f"Kóta 0.000 (střed parcely) = **{st.session_state['terrain']['z_nula']:.2f} m n.m. (Bpv)**")
 
 # --- 3D ENGINE ---
-st.title("🏡 Architektonická situace (v0.38)")
+st.title("🏡 Architektonická situace (v0.39)")
 
 main_pts = st.session_state.get('main_pts', [])
 neighbors = st.session_state.get('neighbors', [])
 budovy = st.session_state.get('budovy', [])
+terrain_data = st.session_state.get('terrain', None)
 
 if not main_pts:
     st.info("Zadej parcelu a klikni na 'Stáhnout a Analyzovat'.")
@@ -157,6 +188,7 @@ else:
         const pts = {main_pts};
         const nbrs = {json.dumps(neighbors)};
         const bldgs = {json.dumps(budovy)};
+        const tData = {json.dumps(terrain_data)};
 
         // Bisektor algoritmus
         function getOffsetPoints(points, distance) {{
@@ -195,7 +227,24 @@ else:
             return sum > 0;
         }}
 
-        // 1. OKOLNÍ PARCELY A CESTY (Bez deformací, lícují k sobě)
+        // 0. DMR 5G TERÉN (Zelený Wireframe)
+        if (tData) {{
+            const tGeom = new THREE.PlaneGeometry(tData.w, tData.h, 20, 20);
+            const tVerts = tGeom.attributes.position.array;
+            for (let i = 0; i < tData.heights.length; i++) {{
+                tVerts[i * 3 + 2] = tData.heights[i];
+            }}
+            tGeom.computeVertexNormals();
+            const tMat = new THREE.MeshPhongMaterial({{ color: 0x4caf50, wireframe: true, transparent: true, opacity: 0.3 }});
+            const terrain = new THREE.Mesh(tGeom, tMat);
+            terrain.rotation.x = -Math.PI / 2;
+            terrain.position.set(0, 0, 0);
+            scene.add(terrain);
+        }} else {{
+            scene.add(new THREE.GridHelper(300, 300, 0xdddddd, 0xf0f0f0));
+        }}
+
+        // 1. OKOLNÍ PARCELY A CESTY
         nbrs.forEach(n => {{
             const nShape = new THREE.Shape();
             nShape.moveTo(n.polygon[0][0], n.polygon[0][1]);
@@ -225,54 +274,44 @@ else:
         linePts.push(linePts[0]);
         scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(linePts), new THREE.LineBasicMaterial({{ color: 0xd32f2f, linewidth: 3 }})));
 
-        // 3. FIXNÍ STAVEBNÍ ČÁRA (Vždy 2 metry přesně DOVNITŘ pozemku)
+        // 3. FIXNÍ STAVEBNÍ ČÁRA (+2.0m DOVNITŘ)
         const signMain = isClockwise(pts) ? -1 : 1; 
         const offPts = getOffsetPoints(pts, 2.0 * signMain);
-        const offGeom = new THREE.BufferGeometry().setFromPoints(offPts);
-        const offLine = new THREE.LineLoop(offGeom, new THREE.LineBasicMaterial({{ color: 0xff9800, linewidth: 2 }}));
+        const offLine = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(offPts), new THREE.LineBasicMaterial({{ color: 0xff9800, linewidth: 2 }}));
         scene.add(offLine);
 
-        // 4. BUDOVY SOUSEDŮ (4m) A POŽÁRNÍ ZÓNY
+        // 4. BUDOVY SOUSEDŮ A POŽÁRNÍ ZÓNY
         bldgs.forEach(b => {{
             const bShape = new THREE.Shape();
             bShape.moveTo(b[0][0], b[0][1]);
             for(let i=1; i<b.length; i++) {{ bShape.lineTo(b[i][0], b[i][1]); }}
             
-            const extrudeSettings = {{ depth: 4.0, bevelEnabled: false }};
-            const bGeom = new THREE.ExtrudeGeometry(bShape, extrudeSettings);
-            const bMat = new THREE.MeshPhongMaterial({{ color: 0x78909c, transparent: true, opacity: 0.85 }});
-            const bMesh = new THREE.Mesh(bGeom, bMat);
+            const bMesh = new THREE.Mesh(new THREE.ExtrudeGeometry(bShape, {{ depth: 4.0, bevelEnabled: false }}), new THREE.MeshPhongMaterial({{ color: 0x78909c, transparent: true, opacity: 0.85 }}));
             bMesh.rotation.x = -Math.PI / 2;
             bMesh.position.y = 0;
             bMesh.castShadow = true;
             scene.add(bMesh);
             
-            const cw = isClockwise(b);
-            const sign = cw ? 1 : -1; 
-
-            // 4m zóna (oranžová)
-            const off4 = getOffsetPoints(b, 4 * sign);
-            const off4Line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(off4), new THREE.LineBasicMaterial({{ color: 0xff9800, linewidth: 2 }}));
+            const sign = isClockwise(b) ? 1 : -1; 
+            const off4Line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(getOffsetPoints(b, 4 * sign)), new THREE.LineBasicMaterial({{ color: 0xff9800, linewidth: 2 }}));
             off4Line.position.y = 0.06;
             scene.add(off4Line);
 
-            // 7m zóna (červená)
-            const off7 = getOffsetPoints(b, 7 * sign);
-            const off7Line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(off7), new THREE.LineBasicMaterial({{ color: 0xf44336, linewidth: 2 }}));
+            const off7Line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(getOffsetPoints(b, 7 * sign)), new THREE.LineBasicMaterial({{ color: 0xf44336, linewidth: 2 }}));
             off7Line.position.y = 0.06;
             scene.add(off7Line);
         }});
 
-        // 5. TVŮJ DŮM (4m výška pro referenci)
+        // 5. TVŮJ DŮM S VÝŠKOVÝM OSAZENÍM
         const houseGeom = new THREE.BoxGeometry(6.25, 4.0, 12.5);
         const houseMat = new THREE.MeshPhongMaterial({{ color: 0x1976d2, transparent: true, opacity: 0.9 }});
         const house = new THREE.Mesh(houseGeom, houseMat);
-        house.position.set({pos_x}, 2.0, -{pos_z});
+        // Osazení je ošetřeno proti chybě se záporným Z
+        house.position.set({pos_x}, {vyska + 2.0}, {-pos_z});
         house.rotation.y = ({rotace} * Math.PI) / 180;
         house.castShadow = true;
         scene.add(house);
 
-        scene.add(new THREE.GridHelper(300, 300, 0xdddddd, 0xf0f0f0));
         scene.add(new THREE.AmbientLight(0xffffff, 0.7));
         const sun = new THREE.DirectionalLight(0xffffff, 0.7);
         sun.position.set(50, 100, 50);
