@@ -4,189 +4,133 @@ import requests
 import json
 import numpy as np
 
-st.set_page_config(page_title="Matomas Master Site v0.52", layout="wide")
+st.set_page_config(page_title="Matomas Urban Master v0.53", layout="wide")
 
 API_KEY_TOPO = "27b312106a0008e8d9879f1800bc2e6b"
 
-# --- 1. KATASTRÁLNÍ DATA ---
-def stahni_cuzk_data(url, params):
-    headers = {"User-Agent": "Mozilla/5.0"}
+# --- 1. DATA KATASTR (S-JTSK) ---
+def stahni_cuzk(url, params):
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=10)
-        if res.status_code == 200: return res.json().get("features", [])
-    except: pass
-    return []
+        res = requests.get(url, params=params, headers={"User-Agent":"Mozilla/5.0"}, timeout=10)
+        return res.json().get("features", [])
+    except: return []
 
-# --- 2. VELKÝ SATELITNÍ TERÉN (Cca 200m okruh) ---
-def get_satellite_terrain(lat, lon, size=0.002): # Zvětšeno pro pokrytí okolí
-    south, north = lat - size, lat + size
-    west, east = lon - size, lon + size
-    url = f"https://portal.opentopography.org/API/globaldem?demtype=COP30&south={south}&north={north}&west={west}&east={east}&outputFormat=JSON&API_Key={API_KEY_TOPO}"
+# --- 2. DATA TERÉN (Satelit Copernicus) ---
+def get_terrain(lat, lon):
+    # Fixní výřez 0.003 stupně (~300m)
+    size = 0.0015
+    url = f"https://portal.opentopography.org/API/globaldem?demtype=COP30&south={lat-size}&north={lat+size}&west={lon-size}&east={lon+size}&outputFormat=JSON&API_Key={API_KEY_TOPO}"
     try:
-        res = requests.get(url, timeout=12)
+        res = requests.get(url, timeout=15)
         if res.status_code == 200: return res.json()
     except: pass
     return None
 
-# --- 3. CENTROVÁNÍ ---
-def center_sjtsk(raw_pts, cx, cy):
-    cartesian = [[-p[0], -p[1]] for p in raw_pts]
-    return [[round(p[0]-cx, 3), round(p[1]-cy, 3)] for p in cartesian]
-
-# --- UI ---
+# --- UI SIDEBAR ---
 with st.sidebar:
-    st.title("🏗️ Master Site Analysis v0.52")
-    ku_kod = st.text_input("Kód KÚ", value="768031")
-    col1, col2 = st.columns(2)
-    with col1: kmen = st.text_input("Kmen", value="45")
-    with col2: pod = st.text_input("Pod", value="124")
+    st.title("🏙️ Urbanistický Kontext v0.53")
+    ku = st.text_input("KÚ", "768031")
+    km = st.text_input("Kmen", "45")
+    pd = st.text_input("Pod", "124")
     
-    if st.button("Generovat kompletní urbanismus", type="primary"):
-        with st.spinner("Stahuji katastr, budovy a velký terén..."):
+    if st.button("Načíst digitální dvojče", type="primary"):
+        with st.spinner("Sestavuji scénu..."):
+            # A. Hlavní parcela
             url_p = "https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/5/query"
-            where_p = f"katastralniuzemi={ku_kod} AND kmenovecislo={kmen} AND " + (f"poddelenicisla={pod}" if pod else "poddelenicisla IS NULL")
-            feat_p = stahni_cuzk_data(url_p, {"where": where_p, "outFields": "objectid", "returnGeometry": "true", "outSR": "5514", "f": "json"})
+            where = f"katastralniuzemi={ku} AND kmenovecislo={km} AND " + (f"poddelenicisla={pd}" if pd else "poddelenicisla IS NULL")
+            f_p = stahni_cuzk(url_p, {"where":where, "outSR":"5514", "f":"json", "returnGeometry":"true"})
             
-            if feat_p:
-                raw_main = feat_p[0]["geometry"]["rings"][0]
-                # Společný střed pro celou scénu
-                cx = sum([-p[0] for p in raw_main]) / len(raw_main)
-                cy = sum([-p[1] for p in raw_main]) / len(raw_main)
-                st.session_state['cx'], st.session_state['cy'] = cx, cy
+            if f_p:
+                ring = f_p[0]["geometry"]["rings"][0]
+                # Střed v metrech S-JTSK (převrácené pro JS)
+                cx, cy = -sum(p[0] for p in ring)/len(ring), -sum(p[1] for p in ring)/len(ring)
+                st.session_state['origin'] = (cx, cy)
+                st.session_state['main'] = [[-p[0]-cx, -p[1]-cy] for p in ring]
                 
-                st.session_state['main_pts'] = center_sjtsk(raw_main, cx, cy)
+                # B. Okolí (200m)
+                bbox = f"{-cx-100},{-cy-100},{-cx+100},{-cy+100}"
                 
-                # Bounding box pro okolí (100m poloměr)
-                orig_cx_sjtsk = sum([p[0] for p in raw_main]) / len(raw_main)
-                orig_cy_sjtsk = sum([p[1] for p in raw_main]) / len(raw_main)
-                bbox = f"{orig_cx_sjtsk-100},{orig_cy_sjtsk-100},{orig_cx_sjtsk+100},{orig_cy_sjtsk+100}"
+                # Sousedé
+                neighs = stahni_cuzk(url_p, {"geometry":bbox, "geometryType":"esriGeometryEnvelope", "inSR":"5514", "outSR":"5514", "f":"json", "outFields":"druhpozemkukod"})
+                st.session_state['neighs'] = [{"pts":[[-p[0]-cx, -p[1]-cy] for p in n["geometry"]["rings"][0]], "road":n["attributes"].get("druhpozemkukod")==14} for n in neighs if n["geometry"]["rings"][0] != ring]
                 
-                # Sousedé a cesty
-                neighs = stahni_cuzk_data(url_p, {"geometry": bbox, "geometryType": "esriGeometryEnvelope", "inSR": "5514", "outFields": "druhpozemkukod", "returnGeometry": "true", "outSR": "5514", "f": "json"})
-                st.session_state['neighbors'] = []
-                for fn in neighs:
-                    poly = fn["geometry"]["rings"][0]
-                    if poly != raw_main:
-                        st.session_state['neighbors'].append({"poly": center_sjtsk(poly, cx, cy), "road": fn["attributes"].get("druhpozemkukod")==14})
-                
-                # Budovy
+                # Budovy (Vrstva 3)
                 url_b = "https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/3/query"
-                bldgs = stahni_cuzk_data(url_b, {"geometry": bbox, "geometryType": "esriGeometryEnvelope", "inSR": "5514", "returnGeometry": "true", "outSR": "5514", "f": "json"})
-                st.session_state['budovy'] = []
-                for fb in bldgs:
-                    for ring in fb["geometry"]["rings"]:
-                        st.session_state['budovy'].append(center_sjtsk(ring, cx, cy))
+                bldgs = stahni_cuzk(url_b, {"geometry":bbox, "geometryType":"esriGeometryEnvelope", "inSR":"5514", "outSR":"5514", "f":"json"})
+                st.session_state['bldgs'] = [[[-p[0]-cx, -p[1]-cy] for p in b["geometry"]["rings"][0]] for b in bldgs]
                 
-                # Terén (GPS pro Nučničky)
-                terrain = get_satellite_terrain(50.518, 14.165)
-                if terrain:
-                    zs = np.array(terrain["height"])
-                    z_min = np.min(zs)
-                    st.session_state['t_data'] = {"heights": (zs - z_min).tolist(), "dim": int(np.sqrt(len(zs)))}
+                # C. Terén (Zatím fix GPS Nučničky)
+                topo = get_terrain(50.518, 14.165)
+                if topo:
+                    zs = np.array(topo["height"])
+                    st.session_state['topo'] = {"z": (zs - np.min(zs)).tolist(), "dim": int(np.sqrt(len(zs)))}
                 
-                st.success("Urbanistický kontext načten!")
+                st.success("Scéna připravena!")
 
     st.write("---")
     vyska = st.slider("Výška 1.NP (m)", -5.0, 5.0, 0.0)
-    pos_x = st.slider("Posun X", -40.0, 40.0, 0.0)
-    pos_z = st.slider("Posun Z", -40.0, 40.0, 0.0)
+    pos_x = st.slider("Posun X", -50.0, 50.0, 0.0)
+    pos_z = st.slider("Posun Z", -50.0, 50.0, 0.0)
     rot = st.slider("Rotace (°)", 0, 360, 0)
 
 # --- 3D ENGINE ---
-st.title("🏡 Digitální dvojče s velkým terénem (v0.52)")
-
-if 'main_pts' in st.session_state:
-    three_js_code = f"""
-    <div id="c" style="width:100%; height:750px; background:#fafafa;"></div>
+if 'main' in st.session_state:
+    t = st.session_state.get('topo')
+    three_js = f"""
+    <div id="v" style="width:100%; height:750px;"></div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <script>
-        const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0xfafafa);
-        const renderer = new THREE.WebGLRenderer({{antialias:true}});
-        renderer.setSize(window.innerWidth, 750);
-        document.getElementById('c').appendChild(renderer.domElement);
-        const camera = new THREE.PerspectiveCamera(45, window.innerWidth/750, 1, 5000);
-        camera.position.set(80, 100, 80);
+        const s = new THREE.Scene(); s.background = new THREE.Color(0xf0f0f0);
+        const r = new THREE.WebGLRenderer({{antialias:true}}); r.setSize(window.innerWidth, 750);
+        document.getElementById('v').appendChild(r.domElement);
+        const c = new THREE.PerspectiveCamera(45, window.innerWidth/750, 1, 2000); c.position.set(100, 100, 100);
+        new THREE.OrbitControls(c, r.domElement);
 
-        function getOffset(pts, dist) {{
-            const res = [];
-            for (let i=0; i<pts.length; i++) {{
-                const p1 = pts[(i+pts.length-1)%pts.length], p2 = pts[i], p3 = pts[(i+1)%pts.length];
-                const v1 = {{x:p2[0]-p1[0], y:p2[1]-p1[1]}}, v2 = {{x:p3[0]-p2[0], y:p3[1]-p2[1]}};
-                const m1 = Math.sqrt(v1.x**2+v1.y**2), m2 = Math.sqrt(v2.x**2+v2.y**2);
-                const n1 = {{x:-v1.y/m1, y:v1.x/m1}}, n2 = {{x:-v2.y/m2, y:v2.x/m2}};
-                const bx = n1.x+n2.x, by = n1.y+n2.y, bm = Math.sqrt(bx**2+by**2);
-                const s = dist / ((n1.x*bx + n1.y*by)/bm);
-                res.push(new THREE.Vector3(p2[0]+(bx/bm)*s, 0.2, -(p2[1]+(by/bm)*s)));
-            }}
-            return res;
-        }}
-
-        // 1. VELKÝ TERÉN
-        const t = {json.dumps(st.session_state.get('t_data'))};
+        // TERÉN (Zvětšený na 300m aby pokryl vše)
+        const t = {json.dumps(t)};
         if(t) {{
-            const geom = new THREE.PlaneGeometry(250, 250, t.dim-1, t.dim-1);
-            const v = geom.attributes.position.array;
-            for(let i=0; i<t.heights.length; i++) {{ v[i*3+2] = t.heights[i] * 1.8; }}
-            geom.computeVertexNormals();
-            const tWire = new THREE.Mesh(geom, new THREE.MeshPhongMaterial({{color:0x4caf50, wireframe:true, transparent:true, opacity:0.15}}));
-            tWire.rotation.x = -Math.PI/2;
-            scene.add(tWire);
-            const tSolid = new THREE.Mesh(geom, new THREE.MeshPhongMaterial({{color:0xfcfcfc, side:2}}));
-            tSolid.rotation.x = -Math.PI/2; tSolid.position.y = -0.1;
-            scene.add(tSolid);
+            const g = new THREE.PlaneGeometry(300, 300, t.dim-1, t.dim-1);
+            const v = g.attributes.position.array;
+            for(let i=0; i<t.z.length; i++) {{ v[i*3+2] = t.z[i] * 1.5; }}
+            g.computeVertexNormals();
+            const mesh = new THREE.Mesh(g, new THREE.MeshPhongMaterial({{color:0x4caf50, wireframe:true, transparent:true, opacity:0.2}}));
+            mesh.rotation.x = -Math.PI/2; mesh.position.y = -0.5; s.add(mesh);
+            const base = new THREE.Mesh(g, new THREE.MeshPhongMaterial({{color:0xffffff, side:2}}));
+            base.rotation.x = -Math.PI/2; base.position.y = -0.6; s.add(base);
         }}
 
-        // 2. HLAVNÍ PARCELA
-        const main = {st.session_state['main_pts']};
-        const shape = new THREE.Shape();
-        shape.moveTo(main[0][0], main[0][1]);
-        main.forEach(p => shape.lineTo(p[0], p[1]));
-        const pMesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({{color:0xc8e6c9, transparent:true, opacity:0.7, side:2}}));
-        pMesh.rotation.x = -Math.PI/2; pMesh.position.y = 0.05;
-        scene.add(pMesh);
-        // Červená hranice
-        const bPts = main.map(p => new THREE.Vector3(p[0], 0.1, -p[1])); bPts.push(bPts[0]);
-        scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(bPts), new THREE.LineBasicMaterial({{color:0xd32f2f, linewidth:2}})));
-        // Odstup 2m
-        scene.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(getOffset(main, -2)), new THREE.LineBasicMaterial({{color:0xff9800}})));
-
-        // 3. OKOLNÍ PARCELY
-        const neighs = {json.dumps(st.session_state.get('neighbors', []))};
+        // PARCELY
+        const neighs = {json.dumps(st.session_state['neighs'])};
         neighs.forEach(n => {{
-            const nShape = new THREE.Shape();
-            nShape.moveTo(n.poly[0][0], n.poly[0][1]);
-            n.poly.forEach(p => nShape.lineTo(p[0], p[1]));
-            const nMesh = new THREE.Mesh(new THREE.ShapeGeometry(nShape), new THREE.MeshBasicMaterial({{color: n.road ? 0xdddddd : 0xf0f0f0, side:2}}));
-            nMesh.rotation.x = -Math.PI/2; nMesh.position.y = 0.02;
-            scene.add(nMesh);
+            const shp = new THREE.Shape(); shp.moveTo(n.pts[0][0], n.pts[0][1]);
+            n.pts.forEach(p => shp.lineTo(p[0], p[1]));
+            const m = new THREE.Mesh(new THREE.ShapeGeometry(shp), new THREE.MeshBasicMaterial({{color:n.road?0xcccccc:0xe0e0e0, side:2}}));
+            m.rotation.x = -Math.PI/2; s.add(m);
         }});
 
-        // 4. BUDOVY
-        const bldgs = {json.dumps(st.session_state.get('budovy', []))};
+        const main = {json.dumps(st.session_state['main'])};
+        const mShp = new THREE.Shape(); mShp.moveTo(main[0][0], main[0][1]);
+        main.forEach(p => mShp.lineTo(p[0], p[1]));
+        const mMesh = new THREE.Mesh(new THREE.ShapeGeometry(mShp), new THREE.MeshBasicMaterial({{color:0xc8e6c9, side:2}}));
+        mMesh.rotation.x = -Math.PI/2; mMesh.position.y = 0.02; s.add(mMesh);
+
+        // BUDOVY
+        const bldgs = {json.dumps(st.session_state['bldgs'])};
         bldgs.forEach(b => {{
-            const bShape = new THREE.Shape();
-            bShape.moveTo(b[0][0], b[0][1]);
-            b.forEach(p => bShape.lineTo(p[0], p[1]));
-            const bMesh = new THREE.Mesh(new THREE.ExtrudeGeometry(bShape, {{depth:4, bevelEnabled:false}}), new THREE.MeshPhongMaterial({{color:0x78909c, transparent:true, opacity:0.8}}));
-            bMesh.rotation.x = -Math.PI/2;
-            scene.add(bMesh);
+            const bShp = new THREE.Shape(); bShp.moveTo(b[0][0], b[0][1]);
+            b.forEach(p => bShp.lineTo(p[0], p[1]));
+            const bm = new THREE.Mesh(new THREE.ExtrudeGeometry(bShp, {{depth:4, bevelEnabled:false}}), new THREE.MeshPhongMaterial({{color:0x78909c, transparent:true, opacity:0.8}}));
+            bm.rotation.x = -Math.PI/2; s.add(bm);
         }});
 
-        // 5. TVŮJ DŮM
-        const house = new THREE.Mesh(new THREE.BoxGeometry(6.25, 4, 12.5), new THREE.MeshPhongMaterial({{color:0x1976d2}}));
-        house.position.set({pos_x}, {vyska+2}, {-pos_z});
-        house.rotation.y = ({rot} * Math.PI) / 180;
-        scene.add(house);
+        // DŮM
+        const h = new THREE.Mesh(new THREE.BoxGeometry(6.25, 4, 12.5), new THREE.MeshPhongMaterial({{color:0x1976d2}}));
+        h.position.set({pos_x}, {vyska+2}, {-pos_z}); h.rotation.y = {rot}*Math.PI/180; s.add(h);
 
-        scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-        const sun = new THREE.DirectionalLight(0xffffff, 0.5); sun.position.set(100,200,100); scene.add(sun);
-        new THREE.OrbitControls(camera, renderer.domElement);
-        function anim() {{ requestAnimationFrame(anim); renderer.render(scene, camera); }}
-        anim();
+        s.add(new THREE.AmbientLight(0xffffff, 0.8));
+        const sun = new THREE.DirectionalLight(0xffffff, 0.5); sun.position.set(100,200,100); s.add(sun);
+        function anim() {{ requestAnimationFrame(anim); r.render(s, c); }} anim();
     </script>
     """
-    components.html(three_js_code, height=770)
-else:
-    st.info("Zadejte údaje a klikněte na tlačítko.")
+    components.html(three_js, height=770)
