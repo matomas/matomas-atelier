@@ -1,4 +1,4 @@
 streamlit
 matplotlib
 ezdxf
-streamlit-obj-viewer
+numpy
