@@ -4,25 +4,27 @@ import requests
 import json
 import numpy as np
 
-st.set_page_config(page_title="Matomas Urban Master v0.58", layout="wide")
+st.set_page_config(page_title="Matomas Urban Master v0.59", layout="wide")
 
 API_KEY_TOPO = "27b312106a0008e8d9879f1800bc2e6b"
 
-# --- 1. CHYTRÉ HLEDÁNÍ KÚ ---
-def najdi_kod_ku(nazev_nebo_kod):
-    if nazev_nebo_kod.isdigit():
-        return nazev_nebo_kod
-    # Vyhledávací služba RÚIAN (Layer 1 = Katastrální území)
+# --- 1. CHYTRÝ NAŠEPTÁVAČ KÚ (S cachováním pro rychlost) ---
+@st.cache_data(ttl=3600)
+def hledej_ku(dotaz):
+    if not dotaz or len(dotaz) < 2: return []
     url = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Vyhledavaci_sluzba_nad_daty_RUIAN/MapServer/1/query"
-    params = {"where": f"UPPER(nazev) LIKE UPPER('{nazev_nebo_kod}%')", "outFields": "kod,nazev", "f": "json"}
+    
+    # Hledá buď podle kódu (čísla) nebo fulltextově podle názvu
+    if dotaz.isdigit():
+        where = f"kod LIKE '{dotaz}%'"
+    else:
+        where = f"UPPER(nazev) LIKE UPPER('%{dotaz}%')"
+        
+    params = {"where": where, "outFields": "kod,nazev", "f": "json", "returnGeometry": "false"}
     try:
-        res = requests.get(url, params=params, headers={"User-Agent":"Mozilla/5.0"}, timeout=10).json()
-        if "features" in res and len(res["features"]) > 0:
-            kod = res["features"][0]["attributes"]["kod"]
-            nazev = res["features"][0]["attributes"]["nazev"]
-            return str(kod), nazev
-    except: pass
-    return None, None
+        res = requests.get(url, params=params, headers={"User-Agent":"Mozilla/5.0"}, timeout=5).json()
+        return res.get("features", [])
+    except: return []
 
 # --- 2. DATA KATASTR ---
 def stahni_cuzk(url, params):
@@ -31,7 +33,7 @@ def stahni_cuzk(url, params):
         return res.json().get("features", [])
     except: return []
 
-# --- 3. DATA TERÉN (Dynamické GPS) ---
+# --- 3. DATA TERÉN ---
 def get_terrain(lat, lon):
     size = 0.0015
     url = f"https://portal.opentopography.org/API/globaldem?demtype=COP30&south={lat-size}&north={lat+size}&west={lon-size}&east={lon+size}&outputFormat=JSON&API_Key={API_KEY_TOPO}"
@@ -43,73 +45,80 @@ def get_terrain(lat, lon):
 
 # --- UI SIDEBAR ---
 with st.sidebar:
-    st.title("🏙️ Urbanistický Kontext v0.58")
+    st.title("🏙️ Urbanistický Kontext v0.59")
     
-    hledani_ku = st.text_input("Katastrální území (Název nebo Kód)", "Nučničky")
-    col1, col2 = st.columns(2)
-    with col1: km = st.text_input("Kmenové č.", "45")
-    with col2: pd = st.text_input("Pododdělení", "124")
+    # NOVÉ UI PRO VÝBĚR KÚ
+    st.subheader("1. Výběr lokality")
+    hledany_text = st.text_input("Začni psát název nebo kód KÚ:", "Varvažov")
     
-    if st.button("Sestavit chytrý model", type="primary"):
-        with st.spinner("Hledám katastr a zaměřuji satelit..."):
-            
-            # Zpracování KÚ
-            if hledani_ku.isdigit():
-                ku_kod, ku_nazev = hledani_ku, f"Kód {hledani_ku}"
-            else:
-                ku_kod, ku_nazev = najdi_kod_ku(hledani_ku)
-            
-            if not ku_kod:
-                st.error(f"Katastrální území '{hledani_ku}' nebylo nalezeno.")
-            else:
-                st.success(f"Nalezeno KÚ: {ku_nazev} ({ku_kod})")
-                
-                url_p = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/5/query"
-                where = f"katastralniuzemi={ku_kod} AND kmenovecislo={km} AND " + (f"poddelenicisla={pd}" if pd else "poddelenicisla IS NULL")
-                
-                # A. Získání S-JTSK lokálních metrů
-                f_p_sjtsk = stahni_cuzk(url_p, {"where":where, "outSR":"5514", "f":"json", "returnGeometry":"true", "outFields":"objectid"})
-                
-                # B. Získání WGS84 GPS pro satelitní terén (Zlatý grál)
-                f_p_gps = stahni_cuzk(url_p, {"where":where, "outSR":"4326", "f":"json", "returnGeometry":"true"})
-                
-                if f_p_sjtsk and f_p_gps:
-                    # Střed parcely v GPS (pro OpenTopography)
-                    gps_ring = f_p_gps[0]["geometry"]["rings"][0]
-                    gps_lon = sum(p[0] for p in gps_ring)/len(gps_ring)
-                    gps_lat = sum(p[1] for p in gps_ring)/len(gps_ring)
+    nalezeno_ku = hledej_ku(hledany_text)
+    vybrane_ku_kod = None
+    
+    if not nalezeno_ku:
+        st.warning("Nenalezeno žádné KÚ. Zadej alespoň 2 znaky.")
+    else:
+        # Roletka pro výběr v případě duplicit
+        vyber = st.selectbox(
+            "Vyber přesné katastrální území:", 
+            options=nalezeno_ku, 
+            format_func=lambda x: f"{x['attributes']['nazev']} ({x['attributes']['kod']})"
+        )
+        vybrane_ku_kod = str(vyber['attributes']['kod'])
+        vybrane_ku_nazev = vyber['attributes']['nazev']
 
-                    # Střed parcely v metrech
-                    main_raw = f_p_sjtsk[0]["geometry"]["rings"][0]
-                    cx, cy = sum(p[0] for p in main_raw)/len(main_raw), sum(p[1] for p in main_raw)/len(main_raw)
-                    st.session_state['main'] = [[round(-p[0]+cx, 3), round(-p[1]+cy, 3)] for p in main_raw]
-                    
-                    bbox = f"{cx-150},{cy-150},{cx+150},{cy+150}"
-                    
-                    # Sousedé
-                    neighs = stahni_cuzk(url_p, {"geometry":bbox, "geometryType":"esriGeometryEnvelope", "inSR":"5514", "outSR":"5514", "f":"json", "outFields":"druhpozemkukod"})
-                    st.session_state['neighs'] = []
-                    for n in neighs:
-                        n_raw = n["geometry"]["rings"][0]
-                        if n_raw != main_raw:
-                            n_local = [[round(-p[0]+cx, 3), round(-p[1]+cy, 3)] for p in n_raw]
-                            st.session_state['neighs'].append({"pts": n_local, "road": n["attributes"].get("druhpozemkukod")==14})
-                    
-                    # Budovy
-                    url_b = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/3/query"
-                    bldgs = stahni_cuzk(url_b, {"geometry":bbox, "geometryType":"esriGeometryEnvelope", "inSR":"5514", "outSR":"5514", "f":"json"})
-                    st.session_state['bldgs'] = []
-                    for b in bldgs:
-                        for ring in b["geometry"]["rings"]:
-                            st.session_state['bldgs'].append([[round(-p[0]+cx, 3), round(-p[1]+cy, 3)] for p in ring])
-                    
-                    # Terén s přesnou dynamickou GPS lokací!
-                    topo = get_terrain(gps_lat, gps_lon)
-                    if topo:
-                        zs = np.array(topo["height"])
-                        st.session_state['topo'] = {"z": (zs - np.min(zs)).tolist(), "dim": int(np.sqrt(len(zs)))}
-                    
-                    st.success("Kompletní model vykreslen!")
+    st.write("---")
+    st.subheader("2. Zadání parcely")
+    col1, col2 = st.columns(2)
+    with col1: km = st.text_input("Kmenové č.", "45" if hledany_text != "Varvažov" else "11") # Demo hodnota
+    with col2: pd = st.text_input("Pododdělení", "124" if hledany_text != "Varvažov" else "")
+    
+    if st.button("Sestavit chytrý model", type="primary", disabled=(vybrane_ku_kod is None)):
+        with st.spinner(f"Stahuji data pro {vybrane_ku_nazev}..."):
+            url_p = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/5/query"
+            where = f"katastralniuzemi={vybrane_ku_kod} AND kmenovecislo={km} AND " + (f"poddelenicisla={pd}" if pd and pd.strip() else "poddelenicisla IS NULL")
+            
+            f_p_sjtsk = stahni_cuzk(url_p, {"where":where, "outSR":"5514", "f":"json", "returnGeometry":"true", "outFields":"objectid"})
+            f_p_gps = stahni_cuzk(url_p, {"where":where, "outSR":"4326", "f":"json", "returnGeometry":"true"})
+            
+            if not f_p_sjtsk:
+                st.error("Tato parcela v daném KÚ neexistuje.")
+            else:
+                # GPS pro terén
+                gps_ring = f_p_gps[0]["geometry"]["rings"][0]
+                gps_lon = sum(p[0] for p in gps_ring)/len(gps_ring)
+                gps_lat = sum(p[1] for p in gps_ring)/len(gps_ring)
+
+                # S-JTSK metry
+                main_raw = f_p_sjtsk[0]["geometry"]["rings"][0]
+                cx, cy = sum(p[0] for p in main_raw)/len(main_raw), sum(p[1] for p in main_raw)/len(main_raw)
+                st.session_state['main'] = [[round(-p[0]+cx, 3), round(-p[1]+cy, 3)] for p in main_raw]
+                
+                bbox = f"{cx-150},{cy-150},{cx+150},{cy+150}"
+                
+                # Sousedé
+                neighs = stahni_cuzk(url_p, {"geometry":bbox, "geometryType":"esriGeometryEnvelope", "inSR":"5514", "outSR":"5514", "f":"json", "outFields":"druhpozemkukod"})
+                st.session_state['neighs'] = []
+                for n in neighs:
+                    n_raw = n["geometry"]["rings"][0]
+                    if n_raw != main_raw:
+                        n_local = [[round(-p[0]+cx, 3), round(-p[1]+cy, 3)] for p in n_raw]
+                        st.session_state['neighs'].append({"pts": n_local, "road": n["attributes"].get("druhpozemkukod")==14})
+                
+                # Budovy
+                url_b = "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/3/query"
+                bldgs = stahni_cuzk(url_b, {"geometry":bbox, "geometryType":"esriGeometryEnvelope", "inSR":"5514", "outSR":"5514", "f":"json"})
+                st.session_state['bldgs'] = []
+                for b in bldgs:
+                    for ring in b["geometry"]["rings"]:
+                        st.session_state['bldgs'].append([[round(-p[0]+cx, 3), round(-p[1]+cy, 3)] for p in ring])
+                
+                # Terén
+                topo = get_terrain(gps_lat, gps_lon)
+                if topo:
+                    zs = np.array(topo["height"])
+                    st.session_state['topo'] = {"z": (zs - np.min(zs)).tolist(), "dim": int(np.sqrt(len(zs)))}
+                
+                st.success("Kompletní model vykreslen!")
 
     st.write("---")
     st.subheader("⛰️ Zobrazení terénu")
@@ -153,29 +162,27 @@ if 'main' in st.session_state:
                 const bx = n1.x+n2.x, by = n1.y+n2.y, bm = Math.sqrt(bx**2+by**2);
                 if (bm < 0.001) {{ res.push(new THREE.Vector3(p2[0]+n1.x*dist, zLevel, -(p2[1]+n1.y*dist))); continue; }}
                 let dot = (n1.x*bx + n1.y*by)/bm;
-                let miter = Math.max(-2.5, Math.min(2.5, 1/dot)); // Clamp spiky corners
+                let miter = Math.max(-2.5, Math.min(2.5, 1/dot)); 
                 res.push(new THREE.Vector3(p2[0]+(bx/bm)*(dist*miter), zLevel, -(p2[1]+(by/bm)*(dist*miter))));
             }}
             if(res.length > 0) res.push(res[0].clone());
             return res;
         }}
 
-        // 1. TERÉN (S flatShading pro architektonický vzhled)
+        // 1. TERÉN
         const t = {json.dumps(t)};
-        const zMult = {z_mult}; // Zvýraznění svahu
+        const zMult = {z_mult}; 
         if(t) {{
             const g = new THREE.PlaneGeometry(350, 350, t.dim-1, t.dim-1);
             const v = g.attributes.position.array;
             for(let i=0; i<t.z.length; i++) {{ v[i*3+2] = t.z[i] * zMult; }}
             g.computeVertexNormals();
             
-            // Architektonický model "Low Poly"
             const mesh = new THREE.Mesh(g, new THREE.MeshPhongMaterial({{
                 color:0xc8e6c9, flatShading: true, transparent:true, opacity:0.6
             }}));
             mesh.rotation.x = -Math.PI/2; mesh.position.y = -0.5; s.add(mesh);
             
-            // Podkladový Wireframe
             const wire = new THREE.Mesh(g, new THREE.MeshBasicMaterial({{color:0x4caf50, wireframe:true, transparent:true, opacity:0.15}}));
             wire.rotation.x = -Math.PI/2; wire.position.y = -0.48; s.add(wire);
         }}
@@ -205,7 +212,7 @@ if 'main' in st.session_state:
         const offMain = getSafeOffset(mainPts, 2.0 * signMain, 0.12);
         if(offMain.length > 0) s.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(offMain), new THREE.LineBasicMaterial({{color: 0xff9800, linewidth: 2}})));
 
-        // 4. BUDOVY A DASHED ZÓNY
+        // 4. BUDOVY A ZÓNY
         const bldgs = {json.dumps(st.session_state.get('bldgs', []))};
         bldgs.forEach(b => {{
             const bShp = new THREE.Shape(); bShp.moveTo(b[0][0], b[0][1]);
@@ -232,14 +239,9 @@ if 'main' in st.session_state:
         const h = new THREE.Mesh(new THREE.BoxGeometry(6.25, 4, 12.5), new THREE.MeshPhongMaterial({{color:0x1976d2}}));
         h.position.set({pos_x}, {vyska+2.1}, {-pos_z}); h.rotation.y = {rot}*Math.PI/180; s.add(h);
 
-        // Architektonické nasvícení scény
         s.add(new THREE.AmbientLight(0xffffff, 0.6));
-        const sun = new THREE.DirectionalLight(0xffffff, 0.7); 
-        sun.position.set(100, 200, 100); 
-        s.add(sun);
-        const fillLight = new THREE.DirectionalLight(0xffffff, 0.3);
-        fillLight.position.set(-100, 50, -100);
-        s.add(fillLight);
+        const sun = new THREE.DirectionalLight(0xffffff, 0.7); sun.position.set(100, 200, 100); s.add(sun);
+        const fillLight = new THREE.DirectionalLight(0xffffff, 0.3); fillLight.position.set(-100, 50, -100); s.add(fillLight);
 
         function anim() {{ requestAnimationFrame(anim); r.render(s, c); }} anim();
     </script>
